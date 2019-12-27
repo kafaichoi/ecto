@@ -123,10 +123,11 @@ defmodule Ecto.Repo do
   The `:measurements` map will include the following, all given in the
   `:native` time unit:
 
-    - `:queue_time` - the time spent waiting to check out a database connection
-    - `:query_time` - the time spent executing the query
-    - `:decode_time` - the time spent decoding the data received from the database
-    - `:total_time` - the sum of the other measurements
+    * `:idle_time` - the time the connection spent waiting before being checked out for the query
+    * `:queue_time` - the time spent waiting to check out a database connection
+    * `:query_time` - the time spent executing the query
+    * `:decode_time` - the time spent decoding the data received from the database
+    * `:total_time` - the sum of the other measurements
 
   All measurements are given in the `:native` time unit. You can read more
   about it in the docs for `System.convert_time_unit/3`.
@@ -161,6 +162,7 @@ defmodule Ecto.Repo do
       @default_dynamic_repo opts[:default_dynamic_repo] || __MODULE__
       @read_only opts[:read_only] || false
       @before_compile adapter
+      @aggregates [:count, :avg, :max, :min, :sum]
 
       def config do
         {:ok, config} = Ecto.Repo.Supervisor.runtime_config(:runtime, __MODULE__, @otp_app, [])
@@ -308,8 +310,20 @@ defmodule Ecto.Repo do
           Ecto.Repo.Queryable.one!(get_dynamic_repo(), queryable, opts)
         end
 
-        def aggregate(queryable, aggregate, field, opts \\ [])
-            when aggregate in [:count, :avg, :max, :min, :sum] and is_atom(field) do
+        def aggregate(queryable, aggregate, opts \\ [])
+
+        def aggregate(queryable, aggregate, opts)
+            when aggregate in [:count] and is_list(opts) do
+          Ecto.Repo.Queryable.aggregate(get_dynamic_repo(), queryable, aggregate, opts)
+        end
+
+        def aggregate(queryable, aggregate, field)
+            when aggregate in @aggregates and is_atom(field) do
+          Ecto.Repo.Queryable.aggregate(get_dynamic_repo(), queryable, aggregate, field, [])
+        end
+
+        def aggregate(queryable, aggregate, field, opts)
+            when aggregate in @aggregates and is_atom(field) and is_list(opts) do
           Ecto.Repo.Queryable.aggregate(get_dynamic_repo(), queryable, aggregate, field, opts)
         end
 
@@ -491,7 +505,7 @@ defmodule Ecto.Repo do
 
   ## Ecto.Adapter.Queryable
 
-  @optional_callbacks get: 3, get!: 3, get_by: 3, get_by!: 3, aggregate: 4, exists?: 2,
+  @optional_callbacks get: 3, get!: 3, get_by: 3, get_by!: 3, aggregate: 3, aggregate: 4, exists?: 2,
                       one: 2, one!: 2, preload: 3, all: 2, stream: 2, update_all: 3, delete_all: 2
 
   @doc """
@@ -606,7 +620,7 @@ defmodule Ecto.Repo do
             ) :: Ecto.Schema.t()
 
   @doc """
-  Calculate the given `aggregate` over the given `field`.
+  Calculate the given `aggregate`.
 
   If the query has a limit, offset or distinct set, it will be
   automatically wrapped in a subquery in order to return the
@@ -627,6 +641,27 @@ defmodule Ecto.Repo do
       `Ecto.Query` documentation.
 
   See the "Shared options" section at the module documentation for more options.
+
+  ## Examples
+
+      # Returns the number of visits per blog post
+      Repo.aggregate(Post, :count)
+
+      # Returns the number of visits per blog post in the "private" schema path
+      # (in Postgres) or database (in MySQL)
+      Repo.aggregate(Post, :count, prefix: "private")
+
+  """
+  @callback aggregate(
+              queryable :: Ecto.Queryable.t(),
+              aggregate :: :count,
+              opts :: Keyword.t()
+            ) :: term | nil
+
+  @doc """
+  Calculate the given `aggregate` over the given `field`.
+
+  See `aggregate/2` for general considerations and options.
 
   ## Examples
 
@@ -783,8 +818,30 @@ defmodule Ecto.Repo do
   This callback is invoked for all query APIs, including the `stream`
   function, but it is not invoked for `insert_all` nor any of the
   schema functions.
+
+  ## Examples
+
+  Let's say you want to filter out records that were "soft-deleted" (have `deleted_at`
+  column set) from all operations unless an admin is running the query; you can define
+  the callback like this:
+
+      @impl true
+      def prepare_query(_operation, query, opts) do
+        if opts[:admin] do
+          {query, opts}
+        else
+          query = from(x in query, where: is_nil(x.deleted_at))
+          {query, opts}
+        end
+      end
+
+  And then execute the query:
+
+      Repo.all(query)              # only non-deleted records are returned
+      Repo.all(query, admin: true) # all records are returned
+
   """
-  @callback prepare_query(operation, Ecto.Query.t(), Keyword.t()) ::
+  @callback prepare_query(operation, query :: Ecto.Query.t(), opts :: Keyword.t()) ::
               {Ecto.Query.t(), Keyword.t()}
             when operation: :all | :update_all | :delete_all | :stream
 
@@ -901,7 +958,7 @@ defmodule Ecto.Repo do
 
   It returns a tuple containing the number of entries and any returned
   result as second element. The second element is `nil` by default
-  unless a `select` is supplied in the update query. Note, however,
+  unless a `select` is supplied in the delete query. Note, however,
   not all databases support returning data from DELETEs.
 
   ## Options
@@ -971,7 +1028,7 @@ defmodule Ecto.Repo do
       in Postgres or the database in MySQL). This overrides the prefix set
       in the query and any `@schema_prefix` set in the schema.
     * `:on_conflict` - It may be one of `:raise` (the default), `:nothing`,
-      `:replace_all`, `:replace_all_except_primary_key`, `{:replace, fields}`,
+      `:replace_all`, `{:replace_all_except, fields}`, `{:replace, fields}`,
       a keyword list of update instructions or an `Ecto.Query`
       query for updates. See the "Upserts" section for more information.
     * `:conflict_target` - A list of column names to verify for conflicts.
@@ -1002,8 +1059,8 @@ defmodule Ecto.Repo do
     * `:replace_all` - replace all values on the existing row by the new entry,
       including values not sent explicitly by Ecto, such as database defaults.
       This option requires a schema
-    * `:replace_all_except_primary_key` - same as above except primary keys are
-      not replaced. This option requires a schema
+    * `{:replace_all_except, fields}` - same as above except the given fields
+      are not replaced. This option requires a schema
     * `{:replace, fields}` - replace only specific columns. This option requires
       conflict_target
     * a keyword list of update instructions - such as the one given to
@@ -1054,14 +1111,16 @@ defmodule Ecto.Repo do
       of fields to be returned from the database. When `true`, returns
       all fields. When `false`, no extra fields are returned. It will
       always include all fields in `read_after_writes` as well as any
-      autogenerated id. Not all databases support this option.
+      autogenerated id. Not all databases support this option and it
+      may not be available during upserts. See the "Upserts" section
+      for more information.
     * `:prefix` - The prefix to run the query on (such as the schema path
       in Postgres or the database in MySQL). This overrides the prefix set
       in the query and any `@schema_prefix` set any schemas. Also, the
       `@schema_prefix` for the parent record will override all default
       `@schema_prefix`s set in any child schemas for associations.
     * `:on_conflict` - It may be one of `:raise` (the default), `:nothing`,
-      `:replace_all`, `:replace_all_except_primary_key`, `{:replace, fields}`,
+      `:replace_all`, `{:replace_all_except, fields}`, `{:replace, fields}`,
       a keyword list of update instructions or an `Ecto.Query` query for updates.
       See the "Upserts" section for more information.
     * `:conflict_target` - A list of column names to verify for conflicts.
@@ -1097,7 +1156,7 @@ defmodule Ecto.Repo do
     * `:replace_all` - replace all values on the existing row with the values
       in the schema/changeset, including autogenerated fields such as `inserted_at`
       and `updated_at`
-    * `:replace_all_except_primary_key` - same as above except primary keys are
+    * `{:replace_all_except, fields}` - same as above except the given fields are
       not replaced
     * `{:replace, fields}` - replace only specific columns. This option requires
       conflict_target
@@ -1421,7 +1480,7 @@ defmodule Ecto.Repo do
       end)
 
       # With Ecto.Multi
-      Ecto.Multi.new
+      Ecto.Multi.new()
       |> Ecto.Multi.insert(:post, %Post{})
       |> MyRepo.transaction
 

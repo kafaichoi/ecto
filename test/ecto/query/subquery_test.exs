@@ -22,7 +22,7 @@ defmodule Ecto.Query.SubqueryTest do
   defmodule Post do
     use Ecto.Schema
 
-    @primary_key {:id, Custom.Permalink, []}
+    @primary_key {:id, CustomPermalink, []}
     schema "posts" do
       field :title, :string, source: :post_title
       field :text, :string
@@ -59,7 +59,7 @@ defmodule Ecto.Query.SubqueryTest do
     {query, params, key} = plan(from(subquery(Post), []))
     assert %{query: %Ecto.Query{}, params: []} = query.from.source
     assert params == []
-    assert key == [:all, [:all, {"posts", Post, 127044068, nil}]]
+    assert key == [:all, [:all, {"posts", Post, 52805476, nil}]]
 
     posts = from(p in Post, where: p.title == ^"hello")
     query = from(c in Comment, join: p in subquery(posts), on: c.post_id == p.id)
@@ -86,7 +86,7 @@ defmodule Ecto.Query.SubqueryTest do
 
     assert query.select.fields == [
       {{:., [type: :string], [{:&, [], [0]}, :t]}, [], []},
-      {{:., [type: :any], [{:&, [], [0]}, :l]}, [], []}
+      {{:., [type: :binary], [{:&, [], [0]}, :l]}, [], []}
     ]
 
     assert [{:t, _}, {:l, "literal"}] = query.from.source.query.select.fields

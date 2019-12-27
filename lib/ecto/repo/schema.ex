@@ -110,7 +110,7 @@ defmodule Ecto.Repo.Schema do
                 {{source, value}, {Map.put(header, source, true), has_query?}}
             end
           %{} ->
-            raise ArgumentError, "unknown field `#{field}` in schema #{inspect schema} given to " <>
+            raise ArgumentError, "unknown field `#{inspect(field)}` in schema #{inspect(schema)} given to " <>
                                  "insert_all. Note virtual fields and associations are not supported"
         end
     end
@@ -562,7 +562,7 @@ defmodule Ecto.Repo.Schema do
         %{^target => {alias, _}} ->
           alias
         %{} when is_atom(target) ->
-          raise ArgumentError, "unknown field `#{target}` in conflict_target"
+          raise ArgumentError, "unknown field `#{inspect(target)}` in conflict_target"
         _ ->
           target
       end
@@ -582,9 +582,6 @@ defmodule Ecto.Repo.Schema do
       :nothing ->
         {:nothing, [], conflict_target}
 
-      :replace_all ->
-        {replace_all_fields!(:replace_all, schema), [], conflict_target}
-
       {:replace, keys} when is_list(keys) and conflict_target == [] ->
         raise ArgumentError, ":conflict_target option is required when :on_conflict is replace"
 
@@ -592,9 +589,17 @@ defmodule Ecto.Repo.Schema do
         fields = Enum.map(keys, &field_source!(schema, &1))
         {fields, [], conflict_target}
 
+      :replace_all ->
+        {replace_all_fields!(:replace_all, schema, []), [], conflict_target}
+
+      {:replace_all_except, fields} ->
+        {replace_all_fields!(:replace_all_except, schema, fields), [], conflict_target}
+
       :replace_all_except_primary_key ->
-        fields = replace_all_fields!(:replace_all_except_primary_key, schema)
-        {fields -- schema.__schema__(:primary_key), [], conflict_target}
+        # TODO: Remove me in future versions
+        IO.warn ":replace_all_except_primary_key is deprecated, please use {:replace_all_except, [...]} instead"
+        fields = replace_all_fields!(:replace_all_except_primary_key, schema, schema && schema.__schema__(:primary_key))
+        {fields, [], conflict_target}
 
       [_ | _] = on_conflict ->
         from = if schema, do: {source, schema}, else: source
@@ -609,12 +614,12 @@ defmodule Ecto.Repo.Schema do
     end
   end
 
-  defp replace_all_fields!(kind, nil) do
+  defp replace_all_fields!(kind, nil, _to_remove) do
     raise ArgumentError, "cannot use #{inspect(kind)} on operations without a schema"
   end
 
-  defp replace_all_fields!(_kind, schema) do
-    Enum.map(schema.__schema__(:fields), &field_source!(schema, &1))
+  defp replace_all_fields!(_kind, schema, to_remove) do
+    Enum.map(schema.__schema__(:fields) -- to_remove, &field_source!(schema, &1))
   end
 
   defp field_source!(nil, field) do
@@ -804,9 +809,7 @@ defmodule Ecto.Repo.Schema do
   defp assoc_opts([], _opts), do: []
 
   defp assoc_opts(_assocs, opts) do
-    opts
-    |> Keyword.take([:timeout, :log, :telemetry_event, :prefix])
-    |> Keyword.put(:skip_transaction, true)
+    Keyword.take(opts, [:timeout, :log, :telemetry_event, :prefix])
   end
 
   defp process_parents(%{changes: changes} = changeset, assocs, adapter, opts) do
@@ -910,8 +913,8 @@ defmodule Ecto.Repo.Schema do
 
   defp wrap_in_transaction(adapter, adapter_meta, opts, relations_changed?, prepare, fun) do
     if (relations_changed? or prepare != []) and
-       Keyword.get(opts, :skip_transaction) != true and
-       function_exported?(adapter, :transaction, 3) do
+       function_exported?(adapter, :transaction, 3) and
+       not adapter.in_transaction?(adapter_meta) do
       adapter.transaction(adapter_meta, opts, fn ->
         case fun.() do
           {:ok, struct} -> struct

@@ -1,5 +1,71 @@
 # Changelog for v3.x
 
+## v3.3.0 (2019-12-11)
+
+### Enhancements
+
+  * [Ecto.Adapter] Add `storage_status/1` callback to `Ecto.Adapters.Storage` behaviour
+  * [Ecto.Changeset] Add `Ecto.Changeset.apply_action!/2`
+  * [Ecto.Changeset] Remove actions restriction in `Ecto.Changeset.apply_action/2`
+  * [Ecto.Repo] Introduce `c:Ecto.Repo.aggregate/2`
+  * [Ecto.Repo] Support `{:replace_all_except, fields}` in `:on_conflict`
+
+### Bug fixes
+
+  * [Ecto.Query] Make sure the `:prefix` option in `:from`/`:join` also cascades to subqueries
+  * [Ecto.Query] Make sure the `:prefix` option in `:join` also cascades to queries
+  * [Ecto.Query] Use database returned values for literals. Previous Ecto versions knew literals from queries should not be discarded for combinations but, even if they were not discarded, we would ignore the values returned by the database
+  * [Ecto.Repo] Do not wrap schema operations in a transaction if already inside a transaction. We have also removed the **private** option called `:skip_transaction`
+
+### Deprecations
+
+  * [Ecto.Repo] `:replace_all_except_primary_keys` is deprecated in favor of `{:replace_all_except, fields}` in `:on_conflict`
+
+## v3.2.5 (2019-11-03)
+
+### Bug fixes
+
+  * [Ecto.Query] Fix a bug where executing some queries would leak the `{:maybe, ...}` type
+
+## v3.2.4 (2019-11-02)
+
+### Bug fixes
+
+  * [Ecto.Query] Improve error message on invalid join binding
+  * [Ecto.Query] Make sure the `:prefix` option in `:join` also applies to through associations
+  * [Ecto.Query] Invoke custom type when loading aggregations from the database (but fallback to database value if it can't be cast)
+  * [mix ecto.gen.repo] Support Elixir v1.9 style configs
+
+## v3.2.3 (2019-10-17)
+
+### Bug fixes
+
+  * [Ecto.Changeset] Do not convert enums given to `validate_inclusion` to a list
+
+### Enhancements
+
+  * [Ecto.Changeset] Improve error message on non-atom keys to change/put_change
+  * [Ecto.Changeset] Allow :with to be given as a `{module, function, args}` tuple on `cast_association/cast_embed`
+  * [Ecto.Changeset] Add `fetch_change!/2` and `fetch_field!/2`
+
+## v3.2.2 (2019-10-01)
+
+### Bug fixes
+
+  * [Ecto.Query] Fix keyword arguments given to `:on` when a bind is not given to join
+  * [Ecto.Repo] Make sure a preload given to an already preloaded has_many :through is loaded
+
+## v3.2.1 (2019-09-17)
+
+### Enhancements
+
+  * [Ecto.Changeset] Add rollover logic for default incremeter in `optimistic_lock`
+  * [Ecto.Query] Also expand macros when used inside `type/2`
+
+### Bug fixes
+
+  * [Ecto.Query] Ensure queries with non-cacheable queries in CTEs/combinations are also not-cacheable
+
 ## v3.2.0 (2019-09-07)
 
 v3.2 requires Elixir v1.6+.
@@ -12,6 +78,7 @@ v3.2 requires Elixir v1.6+.
   * [Ecto.Repo] Merge options given to the repository into the changeset `repo_opts` and assign it back to make it available down the chain
   * [Ecto.Repo] Add `prepare_query/3` callback that is invoked before query operations
   * [Ecto.Repo] Support `:returning` option in `Ecto.Repo.update/2`
+  * [Ecto.Repo] Support passing a one arity function to `Ecto.Repo.transaction/2`, where the argument is the current repo
   * [Ecto.Type] Add a new `embed_as/1` callback to `Ecto.Type` that allows adapters to control embedding behaviour
   * [Ecto.Type] Add `use Ecto.Type` for convenience that implements the new required callbacks
 

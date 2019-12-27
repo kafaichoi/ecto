@@ -53,7 +53,7 @@ defmodule Ecto.Query.PlannerTest do
   defmodule Post do
     use Ecto.Schema
 
-    @primary_key {:id, Custom.Permalink, []}
+    @primary_key {:id, CustomPermalink, []}
     @schema_prefix "my_prefix"
     schema "posts" do
       field :title, :string, source: :post_title
@@ -61,7 +61,7 @@ defmodule Ecto.Query.PlannerTest do
       field :code, :binary
       field :posted, :naive_datetime
       field :visits, :integer
-      field :links, {:array, Custom.Permalink}
+      field :links, {:array, CustomPermalink}
       field :payload, :map, load_in_query: false
 
       has_many :comments, Ecto.Query.PlannerTest.Comment
@@ -325,11 +325,11 @@ defmodule Ecto.Query.PlannerTest do
   end
 
   test "plan: handles specific param type-casting" do
-    value = NaiveDateTime.utc_now
+    value = NaiveDateTime.utc_now()
     {_, params, _} = from(p in Post, where: p.posted > datetime_add(^value, 1, "second")) |> plan()
     assert params == [value]
 
-    value = DateTime.utc_now
+    value = DateTime.utc_now()
     {_, params, _} = from(p in Post, where: p.posted > datetime_add(^value, 1, "second")) |> plan()
     assert params == [value]
 
@@ -341,7 +341,7 @@ defmodule Ecto.Query.PlannerTest do
 
   test "plan: generates a cache key" do
     {_query, _params, key} = plan(from(Post, []))
-    assert key == [:all, {"posts", Post, 27727487, "my_prefix"}]
+    assert key == [:all, {"posts", Post, 36606244, "my_prefix"}]
 
     query =
       from(
@@ -362,7 +362,7 @@ defmodule Ecto.Query.PlannerTest do
                    {:prefix, "foo"},
                    {:where, [{:and, {:is_nil, [], [nil]}}, {:or, {:is_nil, [], [nil]}}]},
                    {:join, [{:inner, {"comments", Comment, 38292156, "world"}, true}]},
-                   {"posts", Post, 27727487, "hello"},
+                   {"posts", Post, 36606244, "hello"},
                    {:select, 1}]
   end
 
@@ -370,6 +370,31 @@ defmodule Ecto.Query.PlannerTest do
     query = from(p in Post, where: p.id in ^[1, 2, 3])
     {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter)
     assert key == :nocache
+  end
+
+  test "plan: combination with uncacheable queries are uncacheable" do
+    query1 =
+      Post
+      |> where([p], p.id in ^[1, 2, 3])
+      |> select([p], p.id)
+
+    query2 =
+      Post
+      |> where([p], p.id in [1, 2])
+      |> select([p], p.id)
+      |> distinct(true)
+
+    {_, _, key} = query1 |> union_all(^query2) |> Planner.plan(:all, Ecto.TestAdapter)
+    assert key == :nocache
+  end
+
+  test "plan: ctes with uncacheable queries are uncacheable" do
+    {_, _, cache} =
+      Comment
+      |> with_cte("cte", as: ^from(c in Comment, where: c.id in ^[1, 2, 3]))
+      |> plan()
+
+    assert cache == :nocache
   end
 
   test "plan: normalizes prefixes" do
@@ -393,7 +418,52 @@ defmodule Ecto.Query.PlannerTest do
     {query, _, _} = from(Post, prefix: "local", select: 1) |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"posts", Post, "local"}}
 
-    # No schema prefix in join
+    # Subquery in from
+    {query, _, _} = from(subquery(Comment), select: 1) |> plan()
+    assert {%{query: %{sources: {{"comments", Comment, nil}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Comment), select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"comments", Comment, "global"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Comment, prefix: "sub"), select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"comments", Comment, "sub"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Comment, prefix: "sub"), prefix: "local", select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"comments", Comment, "local"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Post), select: 1) |> plan()
+    assert {%{query: %{sources: {{"posts", Post, "my_prefix"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Post), select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"posts", Post, "my_prefix"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Post, prefix: "sub"), select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"posts", Post, "my_prefix"}}}}} = query.sources
+
+    {query, _, _} = from(subquery(Post, prefix: "sub"), prefix: "local", select: 1) |> Map.put(:prefix, "global") |> plan()
+    assert {%{query: %{sources: {{"posts", Post, "my_prefix"}}}}} = query.sources
+
+    # Schema prefix in join
+    {query, _, _} = from(c in Comment, join: Post) |> plan()
+    assert query.sources == {{"comments", Comment, nil}, {"posts", Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: Post) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: Post, prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "local"}}
+
+    # Schema prefix in query join
+    {query, _, _} = from(p in Post, join: ^from(c in Comment)) |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}}
+
+    {query, _, _} = from(p in Post, join: ^from(c in Comment)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "global"}}
+
+    {query, _, _} = from(p in Post, join: ^from(c in Comment), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}}
+
+    # No schema prefix in assoc join
     {query, _, _} = from(c in Comment, join: assoc(c, :comment_posts)) |> plan()
     assert query.sources == {{"comments", Comment, nil}, {"comment_posts", CommentPost, nil}}
 
@@ -403,7 +473,7 @@ defmodule Ecto.Query.PlannerTest do
     {query, _, _} = from(c in Comment, join: assoc(c, :comment_posts), prefix: "local") |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"comments", Comment, "global"}, {"comment_posts", CommentPost, "local"}}
 
-    # Schema prefix in join
+    # Schema prefix in assoc join
     {query, _, _} = from(c in Comment, join: assoc(c, :post)) |> plan()
     assert query.sources == {{"comments", Comment, nil}, {"posts", Post, "my_prefix"}}
 
@@ -413,7 +483,7 @@ defmodule Ecto.Query.PlannerTest do
     {query, _, _} = from(c in Comment, join: assoc(c, :post), prefix: "local") |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "local"}}
 
-    # Schema prefix for many-to-many joins
+    # Schema prefix for assoc many-to-many joins
     {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments)) |> plan()
     assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}, {"comment_posts", CommentPost, nil}}
 
@@ -423,7 +493,7 @@ defmodule Ecto.Query.PlannerTest do
     {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments), prefix: "local") |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}, {"comment_posts", CommentPost, "local"}}
 
-    # Schema prefix for many-to-many joins (when join_through is a table name)
+    # Schema prefix for assoc many-to-many joins (when join_through is a table name)
     {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments_without_schema)) |> plan()
     assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}, {"comment_posts", nil, nil}}
 
@@ -432,6 +502,13 @@ defmodule Ecto.Query.PlannerTest do
 
     {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments_without_schema), prefix: "local") |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}, {"comment_posts", nil, "local"}}
+
+    # Schema prefix for assoc has through
+    {query, _, _} = from(c in Comment, join: assoc(c, :post_comments)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comments", Comment, "global"}, {"posts", Ecto.Query.PlannerTest.Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: assoc(c, :post_comments), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comments", Comment, "local"}, {"posts", Ecto.Query.PlannerTest.Post, "local"}}
   end
 
   test "plan: combination queries" do
@@ -636,10 +713,10 @@ defmodule Ecto.Query.PlannerTest do
            %Ecto.Query.Tagged{type: :integer, value: {:^, [], [0]}, tag: :integer}
     assert params == [1]
 
-    {query, params, _select} = from(Post, []) |> select([p], type(^"1", Custom.Permalink))
+    {query, params, _select} = from(Post, []) |> select([p], type(^"1", CustomPermalink))
                                               |> normalize_with_params
     assert query.select.expr ==
-           %Ecto.Query.Tagged{type: :id, value: {:^, [], [0]}, tag: Custom.Permalink}
+           %Ecto.Query.Tagged{type: :id, value: {:^, [], [0]}, tag: CustomPermalink}
     assert params == [1]
 
     {query, params, _select} = from(Post, []) |> select([p], type(^"1", p.visits))
@@ -775,7 +852,7 @@ defmodule Ecto.Query.PlannerTest do
 
   test "normalize: select with unions" do
     union_query = from(Post, []) |> select([p], %{title: p.title, category: "Post"})
-    query = from(Post, []) |> select([p], %{title: p.title, category: "Post"}) |> union(^union_query) |>  normalize()
+    query = from(Post, []) |> select([p], %{title: p.title, category: "Post"}) |> union(^union_query) |> normalize()
 
     union_query = query.combinations |> List.first() |> elem(1)
     assert "Post" in query.select.fields

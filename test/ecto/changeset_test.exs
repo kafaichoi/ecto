@@ -308,7 +308,7 @@ defmodule Ecto.ChangesetTest do
   end
 
   test "cast/4: fails on invalid field" do
-    assert_raise ArgumentError, ~r"unknown field `unknown`", fn ->
+    assert_raise ArgumentError, ~r"unknown field `:unknown`", fn ->
       cast(%Post{}, %{}, ~w(unknown)a)
     end
   end
@@ -585,9 +585,18 @@ defmodule Ecto.ChangesetTest do
   end
 
   test "change/2 with unknown field" do
-    post = %Post{decimal: Decimal.new("1.0")}
-    assert_raise ArgumentError, ~r"unknown field `unknown`", fn ->
+    post = %Post{}
+
+    assert_raise ArgumentError, ~r"unknown field `:unknown`", fn ->
       change(post, unknown: Decimal.new(1))
+    end
+  end
+
+  test "change/2 with non-atom field" do
+    post = %Post{}
+
+    assert_raise ArgumentError, ~r"must be atoms, got: `\"bad\"`", fn ->
+      change(post, %{"bad" => 42})
     end
   end
 
@@ -597,6 +606,17 @@ defmodule Ecto.ChangesetTest do
     assert fetch_field(changeset, :title) == {:changes, "foo"}
     assert fetch_field(changeset, :body) == {:data, "bar"}
     assert fetch_field(changeset, :other) == :error
+  end
+
+  test "fetch_field!/2" do
+    changeset = changeset(%Post{body: "bar"}, %{"title" => "foo"})
+
+    assert fetch_field!(changeset, :title) == "foo"
+    assert fetch_field!(changeset, :body) == "bar"
+
+    assert_raise KeyError, ~r/key :other not found in/, fn ->
+      fetch_field!(changeset, :other)
+    end
   end
 
   test "get_field/3" do
@@ -622,6 +642,18 @@ defmodule Ecto.ChangesetTest do
     assert fetch_change(changeset, :title) == {:ok, "foo"}
     assert fetch_change(changeset, :body) == :error
     assert fetch_change(changeset, :upvotes) == {:ok, nil}
+  end
+
+  test "fetch_change!/2" do
+    changeset = changeset(%{"title" => "foo", "body" => nil, "upvotes" => nil})
+
+    assert fetch_change!(changeset, :title) == "foo"
+
+    assert_raise KeyError, "key :body not found in: %{title: \"foo\", upvotes: nil}", fn ->
+      fetch_change!(changeset, :body)
+    end
+
+    assert fetch_change!(changeset, :upvotes) == nil
   end
 
   test "get_change/3" do
@@ -705,34 +737,55 @@ defmodule Ecto.ChangesetTest do
     assert changed_post.title == "foo"
   end
 
-  test "apply_action/2 with valid changeset" do
-    post = %Post{}
-    assert post.title == ""
+  describe "apply_action/2" do
+    test "valid changeset" do
+      post = %Post{}
+      assert post.title == ""
 
-    changeset = changeset(post, %{"title" => "foo"})
-    assert changeset.valid?
-    assert {:ok, changed_post} = apply_action(changeset, :update)
+      changeset = changeset(post, %{"title" => "foo"})
+      assert changeset.valid?
+      assert {:ok, changed_post} = apply_action(changeset, :update)
 
-    assert changed_post.__struct__ == post.__struct__
-    assert changed_post.title == "foo"
+      assert changed_post.__struct__ == post.__struct__
+      assert changed_post.title == "foo"
+    end
+
+    test "invalid changeset" do
+      changeset =
+        %Post{}
+        |> changeset(%{"title" => "foo"})
+        |> validate_length(:title, min: 10)
+
+      refute changeset.valid?
+      changeset_new_action = %Ecto.Changeset{changeset | action: :update}
+      assert {:error, ^changeset_new_action} = apply_action(changeset, :update)
+    end
+
+    test "invalid action" do
+      assert_raise ArgumentError, ~r/expected action to be an atom/, fn ->
+        %Post{}
+        |> changeset(%{})
+        |> apply_action("invalid_action")
+      end
+    end
   end
 
-  test "apply_action/2 with invalid changeset" do
-    changeset =
-      %Post{}
-      |> changeset(%{"title" => "foo"})
-      |> validate_length(:title, min: 10)
+  describe "apply_action!/2" do
+    test "valid changeset" do
+      changeset = changeset(%Post{}, %{"title" => "foo"})
+      post = apply_action!(changeset, :update)
+      assert post.title == "foo"
+    end
 
-    refute changeset.valid?
-    changeset_new_action = %Ecto.Changeset{changeset | action: :update}
-    assert {:error, ^changeset_new_action} = apply_action(changeset, :update)
-  end
+    test "invalid changeset" do
+      changeset =
+        %Post{}
+        |> changeset(%{"title" => "foo"})
+        |> validate_length(:title, min: 10)
 
-  test "apply_action/2 with invalid action" do
-    assert_raise ArgumentError, ~r/unknown action/, fn ->
-      %Post{}
-      |> changeset(%{})
-      |> apply_action(:invalid_action)
+      assert_raise Ecto.InvalidChangesetError, fn ->
+        apply_action!(changeset, :update)
+      end
     end
   end
 
@@ -915,13 +968,6 @@ defmodule Ecto.ChangesetTest do
       changeset(%{"title" => "hello"})
       |> validate_inclusion(:title, ~w(world), message: "yada")
     assert changeset.errors == [title: {"yada", [validation: :inclusion, enum: ~w(world)]}]
-
-    changeset =
-      changeset(%{"title" => "hello"})
-      |> validate_inclusion(:title, MapSet.new(["world"]))
-    refute changeset.valid?
-    assert changeset.errors == [title: {"is invalid", [validation: :inclusion, enum: ~w(world)]}]
-    assert validations(changeset) == [title: {:inclusion, MapSet.new(["world"])}]
   end
 
   test "validate_subset/3" do
@@ -943,13 +989,6 @@ defmodule Ecto.ChangesetTest do
       changeset(%{"topics" => ["laptop"]})
       |> validate_subset(:topics, ~w(cat dog), message: "yada")
     assert changeset.errors == [topics: {"yada", [validation: :subset, enum: ~w(cat dog)]}]
-
-    changeset =
-      changeset(%{"topics" => ["cat", "laptop"]})
-      |> validate_subset(:topics, MapSet.new(["cat", "dog"]))
-    refute changeset.valid?
-    assert changeset.errors == [topics: {"has an invalid entry", [validation: :subset, enum: ~w(cat dog)]}]
-    assert validations(changeset) == [topics: {:subset, MapSet.new(["cat", "dog"])}]
   end
 
   test "validate_exclusion/3" do
@@ -971,13 +1010,6 @@ defmodule Ecto.ChangesetTest do
       changeset(%{"title" => "world"})
       |> validate_exclusion(:title, ~w(world), message: "yada")
     assert changeset.errors == [title: {"yada", [validation: :exclusion, enum: ~w(world)]}]
-
-    changeset =
-      changeset(%{"title" => "world"})
-      |> validate_exclusion(:title, MapSet.new(["world"]))
-    refute changeset.valid?
-    assert changeset.errors == [title: {"is reserved", [validation: :exclusion, enum: ~w(world)]}]
-    assert validations(changeset) == [title: {:exclusion, MapSet.new(["world"])}]
   end
 
   test "validate_length/3 with string" do
@@ -1401,7 +1433,7 @@ defmodule Ecto.ChangesetTest do
 
   ## Locks
 
-  test "optimistic_lock/3 with changeset" do
+  test "optimistic_lock/3 with changeset with default incremeter" do
     changeset = changeset(%{}) |> optimistic_lock(:upvotes)
     assert changeset.filters == %{upvotes: 0}
     assert changeset.changes == %{upvotes: 1}
@@ -1409,7 +1441,20 @@ defmodule Ecto.ChangesetTest do
     changeset = changeset(%Post{upvotes: 2}, %{upvotes: 1}) |> optimistic_lock(:upvotes)
     assert changeset.filters == %{upvotes: 1}
     assert changeset.changes == %{upvotes: 2}
-  end
+
+    # Assert default increment will rollover to 1 when the current one is equal or graeter than 2_147_483_647
+    changeset = changeset(%Post{upvotes: 2_147_483_647}, %{}) |> optimistic_lock(:upvotes)
+    assert changeset.filters == %{upvotes: 2_147_483_647}
+    assert changeset.changes == %{upvotes: 1}
+
+    changeset = changeset(%Post{upvotes: 3_147_483_647}, %{}) |> optimistic_lock(:upvotes)
+    assert changeset.filters == %{upvotes: 3_147_483_647}
+    assert changeset.changes == %{upvotes: 1}
+
+    changeset = changeset(%Post{upvotes: 2_147_483_647}, %{upvotes: 2_147_483_648}) |> optimistic_lock(:upvotes)
+    assert changeset.filters == %{upvotes: 2_147_483_648}
+    assert changeset.changes == %{upvotes: 1}
+ end
 
   test "optimistic_lock/3 with struct" do
     changeset = %Post{} |> optimistic_lock(:upvotes)

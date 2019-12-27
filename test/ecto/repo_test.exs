@@ -198,6 +198,10 @@ defmodule Ecto.RepoTest do
       TestRepo.aggregate(MySchema, :count, :id)
       assert_received {:all, query}
       assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count(m0.id)>"
+
+      TestRepo.aggregate(MySchema, :count)
+      assert_received {:all, query}
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count()>"
     end
 
     test "aggregates handle a prefix option" do
@@ -1001,9 +1005,9 @@ defmodule Ecto.RepoTest do
       end
     end
 
-    test "passes all fields except primary keys on replace_all_except_primary_keys" do
-      fields = [:x, :yyy, :z, :array, :map]
-      TestRepo.insert(%MySchema{id: 1}, on_conflict: :replace_all_except_primary_key)
+    test "passes all fields except given fields" do
+      fields = [:x, :yyy, :z, :map]
+      TestRepo.insert(%MySchema{id: 1}, on_conflict: {:replace_all_except, [:id, :array]})
       assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], []}}}
     end
 
@@ -1145,7 +1149,7 @@ defmodule Ecto.RepoTest do
 
     test "keeps the proper repo in  multi" do
       fun = fn repo, _changes -> {:ok, repo} end
-      multi = Ecto.Multi.new |> Ecto.Multi.run(:run, fun)
+      multi = Ecto.Multi.new() |> Ecto.Multi.run(:run, fun)
       assert {:ok, changes} = TestRepo.transaction(multi)
       assert changes.run == TestRepo
     end

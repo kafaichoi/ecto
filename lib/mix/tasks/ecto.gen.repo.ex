@@ -36,7 +36,7 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
         [_ | _] -> Mix.raise "ecto.gen.repo expects a single repository to be given"
       end
 
-    config      = Mix.Project.config
+    config      = Mix.Project.config()
     underscored = Macro.underscore(inspect(repo))
 
     base = Path.basename(underscored)
@@ -50,16 +50,19 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
     case File.read(config_path) do
       {:ok, contents} ->
-        Mix.shell.info [:green, "* updating ", :reset, "config/config.exs"]
-        File.write! "config/config.exs",
-                    String.replace(contents, "use Mix.Config\n", config_template(opts))
+        check = String.contains?(contents, "import Config")
+        config_first_line = get_first_config_line(check) <> "\n"
+        new_contents = config_first_line <> "\n" <> config_template(opts)
+        Mix.shell().info [:green, "* updating ", :reset, "config/config.exs"]
+        File.write! "config/config.exs", String.replace(contents, config_first_line, new_contents)
       {:error, _} ->
-        create_file "config/config.exs", config_template(opts)
+        config_first_line = Config |> Code.ensure_loaded?() |> get_first_config_line()
+        create_file "config/config.exs", config_first_line <> "\n\n" <> config_template(opts)
     end
 
     open?("config/config.exs")
 
-    Mix.shell.info """
+    Mix.shell().info """
     Don't forget to add your new repo to your supervision tree
     (typically in lib/#{app}/application.ex):
 
@@ -74,6 +77,9 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
     """
   end
 
+  defp get_first_config_line(true), do: "import Config"
+  defp get_first_config_line(false), do: "use Mix.Config"
+
   embed_template :repo, """
   defmodule <%= inspect @mod %> do
     use Ecto.Repo,
@@ -83,8 +89,6 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
   """
 
   embed_template :config, """
-  use Mix.Config
-
   config <%= inspect @app %>, <%= inspect @mod %>,
     database: "<%= @app %>_<%= @base %>",
     username: "user",

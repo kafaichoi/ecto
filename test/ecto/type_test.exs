@@ -146,7 +146,7 @@ defmodule Ecto.TypeTest do
     value = ~N[2010-04-17 14:00:00.123]
     assert cast({:param, :any_datetime}, value) == {:ok, value}
 
-    value = DateTime.utc_now
+    value = DateTime.utc_now()
     assert cast({:param, :any_datetime}, value) == {:ok, value}
 
     value = "2010-04-17 14:00:00"
@@ -182,6 +182,17 @@ defmodule Ecto.TypeTest do
     assert_raise ArgumentError, ~r"#Decimal<NaN> is not allowed for type :decimal", fn ->
       dump(:decimal, Decimal.new("nan"))
     end
+  end
+
+  test "maybe" do
+    assert dump({:maybe, :decimal}, 1) == {:ok, Decimal.new(1)}
+    assert dump({:maybe, :decimal}, "not decimal") == {:ok, "not decimal"}
+
+    assert load({:maybe, :decimal}, 1) == {:ok, Decimal.new(1)}
+    assert load({:maybe, :decimal}, "not decimal") == {:ok, "not decimal"}
+
+    assert cast({:maybe, :decimal}, 1) == {:ok, Decimal.new(1)}
+    assert cast({:maybe, :decimal}, "not decimal") == {:ok, "not decimal"}
   end
 
   describe "embeds" do
@@ -485,6 +496,20 @@ defmodule Ecto.TypeTest do
              :error
 
       assert Ecto.Type.cast(:naive_datetime, %{year: 2015, month: 1, day: 23, hour: 23, minute: nil}) ==
+             :error
+
+      assert Ecto.Type.cast(:naive_datetime, %{"year" => "", "month" => "", "day" => "",
+                                               "hour" => "23", "minute" => "50", "second" => "07"}) ==
+             :error
+
+      assert Ecto.Type.cast(:naive_datetime, %{year: nil, month: nil, day: nil, hour: 23, minute: 50, second: 07}) ==
+             :error
+
+      assert Ecto.Type.cast(:naive_datetime, %{"year" => "2015", "month" => "1", "day" => "23",
+                                               "hour" => "", "minute" => ""}) ==
+             :error
+
+      assert Ecto.Type.cast(:naive_datetime, %{year: 2015, month: 1, day: 23, hour: nil, minute: nil}) ==
              :error
 
       assert Ecto.Type.cast(:naive_datetime, DateTime.from_unix!(10, :second)) ==

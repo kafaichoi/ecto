@@ -1,5 +1,3 @@
-Code.require_file "../support/types.exs", __DIR__
-
 defmodule Ecto.Integration.TypeTest do
   use Ecto.Integration.Case, async: Application.get_env(:ecto, :async_integration_tests, true)
 
@@ -76,6 +74,15 @@ defmodule Ecto.Integration.TypeTest do
     assert [^datetime] = TestRepo.all(query)
   end
 
+  # We don't specifically assert on the tuple content because
+  # some databases would return integer, others decimal.
+  # The important is that the type has been invoked for wrapping.
+  test "aggregate custom types" do
+    TestRepo.insert!(%Post{wrapped_visits: {:int, 10}})
+    query = from p in Post, select: sum(p.wrapped_visits)
+    assert [{:int, _}] = TestRepo.all(query)
+  end
+
   @tag :aggregate_filters
   test "aggregate filter types" do
     datetime = ~N[2014-01-16 20:26:51]
@@ -109,7 +116,7 @@ defmodule Ecto.Integration.TypeTest do
     assert [1.0] = TestRepo.all(from p in Post, select: type(^"1", p.intensity))
 
     # Custom wrappers
-    assert [1] = TestRepo.all(from Post, select: type(^"1", Elixir.Custom.Permalink))
+    assert [1] = TestRepo.all(from Post, select: type(^"1", CustomPermalink))
 
     # Custom types
     uuid = Ecto.UUID.generate()
@@ -365,6 +372,36 @@ defmodule Ecto.Integration.TypeTest do
     assert [1] = TestRepo.all(from p in Post, select: type(sum(p.cost), :integer))
     assert [1.0] = TestRepo.all(from p in Post, select: type(sum(p.cost), :float))
     assert [^decimal] = TestRepo.all(from p in Post, select: type(sum(p.cost), :decimal))
+  end
+
+  @tag :decimal_type
+  test "on coalesce with mixed types" do
+    decimal = Decimal.new("1.0")
+    TestRepo.insert!(%Post{cost: decimal})
+    assert [^decimal] = TestRepo.all(from p in Post, select: coalesce(p.cost, 0))
+  end
+
+  test "unions with literals" do
+    TestRepo.insert!(%Post{})
+    TestRepo.insert!(%Post{})
+
+    query1 = from(p in Post, select: %{n: 1})
+    query2 = from(p in Post, select: %{n: 2})
+
+    assert TestRepo.all(union_all(query1, ^query2)) ==
+            [%{n: 1}, %{n: 1}, %{n: 2}, %{n: 2}]
+
+    query1 = from(p in Post, select: %{n: 1.0})
+    query2 = from(p in Post, select: %{n: 2.0})
+
+    assert TestRepo.all(union_all(query1, ^query2)) ==
+            [%{n: 1.0}, %{n: 1.0}, %{n: 2.0}, %{n: 2.0}]
+
+    query1 = from(p in Post, select: %{n: "foo"})
+    query2 = from(p in Post, select: %{n: "bar"})
+
+    assert TestRepo.all(union_all(query1, ^query2)) ==
+            [%{n: "foo"}, %{n: "foo"}, %{n: "bar"}, %{n: "bar"}]
   end
 
   test "schemaless types" do

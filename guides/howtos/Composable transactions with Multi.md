@@ -87,7 +87,7 @@ john_update =
     where: [id: ^john.id],
     update: [inc: [balance: -10]]
 
-Ecto.Multi.new
+Ecto.Multi.new()
 |> Ecto.Multi.update_all(:mary, mary_update)
 |> Ecto.Multi.update_all(:john, john_update)
 ```
@@ -171,7 +171,8 @@ defmodule MyApp.Post do
     []
   end
   defp insert_and_get_all(names) do
-    maps = Enum.map(names, &%{name: &1})
+    timestamp = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    maps = Enum.map(names, &%{name: &1, inserted_at: timestamp, updated_at: timestamp})
     Repo.insert_all MyApp.Tag, maps, on_conflict: :nothing
     Repo.all from t in MyApp.Tag, where: t.name in ^names
   end
@@ -225,7 +226,7 @@ Now, whenever we need to introduce a post with tags, we can create a multi that 
 alias MyApp.Tag
 
 def insert_or_update_post_with_tags(post, params) do
-  Ecto.Multi.new
+  Ecto.Multi.new()
   |> Ecto.Multi.run(:tags, fn _, changes ->
     insert_and_get_all_tags(changes, params)
   end)
@@ -239,8 +240,9 @@ defp insert_and_get_all_tags(_changes, params) do
   case MyApp.Tag.parse(params["tags"]) do
     [] ->
       {:ok, []}
-    tags ->
-      maps = Enum.map(names, &%{name: &1})
+    names ->
+      timestamp = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+      maps = Enum.map(names, &%{name: &1, inserted_at: timestamp, updated_at: timestamp})
       Repo.insert_all(Tag, maps, on_conflict: :nothing)
       query = from t in Tag, where: t.name in ^names
       {:ok, Repo.all(query)}

@@ -48,7 +48,7 @@ defmodule Ecto.SchemaTest do
   end
 
   test "changeset metadata" do
-    assert Schema.__changeset__ |> Map.drop([:comment, :permalink]) ==
+    assert Schema.__changeset__() |> Map.drop([:comment, :permalink]) ==
            %{name: :string, email: :string, count: :decimal, array: {:array, :string},
              comment_id: :id, temp: :any, id: :id, uuid: Ecto.UUID, query_excluded_field: :string}
   end
@@ -109,7 +109,7 @@ defmodule Ecto.SchemaTest do
   defmodule CustomSchema do
     use Ecto.Schema
 
-    @primary_key {:perm, Custom.Permalink, autogenerate: true}
+    @primary_key {:perm, CustomPermalink, autogenerate: true}
     @foreign_key_type :string
     @field_source_mapper &(&1 |> Atom.to_string |> String.upcase |> String.to_atom())
 
@@ -123,7 +123,7 @@ defmodule Ecto.SchemaTest do
 
   test "custom schema attributes" do
     assert %CustomSchema{perm: "abc"}.perm == "abc"
-    assert CustomSchema.__schema__(:autogenerate_id) == {:perm, :PERM, Custom.Permalink}
+    assert CustomSchema.__schema__(:autogenerate_id) == {:perm, :PERM, CustomPermalink}
     assert CustomSchema.__schema__(:type, :comment_id) == :string
   end
 
@@ -284,16 +284,6 @@ defmodule Ecto.SchemaTest do
     from = {"another_company", SchemaWithPrefix}
     query = from(from, select: 1)
     assert query.from.prefix == "tenant"
-  end
-
-  test "schema prefix in queries join" do
-    import Ecto.Query
-
-    query = from("query", join: _ in SchemaWithPrefix, select: 1)
-    assert hd(query.joins).prefix == "tenant"
-
-    query = from("query", join: _ in {"another_company", SchemaWithPrefix}, select: 1)
-    assert hd(query.joins).prefix == "tenant"
   end
 
   ## Composite primary keys
@@ -457,7 +447,7 @@ defmodule Ecto.SchemaTest do
                             on_replace: :raise}
 
     assert AssocSchema.__schema__(:association, :posts) == struct
-    assert AssocSchema.__changeset__.posts == {:assoc, struct}
+    assert AssocSchema.__changeset__().posts == {:assoc, struct}
 
     posts = (%AssocSchema{}).posts
     assert %Ecto.Association.NotLoaded{} = posts
@@ -471,7 +461,7 @@ defmodule Ecto.SchemaTest do
                             queryable: {"users_emails", Email}, on_replace: :delete}
 
     assert AssocSchema.__schema__(:association, :emails) == struct
-    assert AssocSchema.__changeset__.emails == {:assoc, struct}
+    assert AssocSchema.__changeset__().emails == {:assoc, struct}
 
     posts = (%AssocSchema{}).posts
     assert %Ecto.Association.NotLoaded{__cardinality__: :many} = posts
@@ -483,7 +473,7 @@ defmodule Ecto.SchemaTest do
            %Ecto.Association.HasThrough{field: :comment_authors, owner: AssocSchema, cardinality: :many,
                                          through: [:comment, :authors], owner_key: :comment_id}
 
-    refute Map.has_key?(AssocSchema.__changeset__, :comment_authors)
+    refute Map.has_key?(AssocSchema.__changeset__(), :comment_authors)
 
     authors = (%AssocSchema{}).comment_authors
     assert %Ecto.Association.NotLoaded{} = authors
@@ -497,7 +487,7 @@ defmodule Ecto.SchemaTest do
                             on_replace: :raise}
 
     assert AssocSchema.__schema__(:association, :author) == struct
-    assert AssocSchema.__changeset__.author == {:assoc, struct}
+    assert AssocSchema.__changeset__().author == {:assoc, struct}
 
     author = (%AssocSchema{}).author
     assert %Ecto.Association.NotLoaded{} = author
@@ -511,7 +501,7 @@ defmodule Ecto.SchemaTest do
                             queryable: {"users_profiles", Profile}, on_replace: :raise}
 
     assert AssocSchema.__schema__(:association, :profile) == struct
-    assert AssocSchema.__changeset__.profile == {:assoc, struct}
+    assert AssocSchema.__changeset__().profile == {:assoc, struct}
 
     author = (%AssocSchema{}).author
     assert %Ecto.Association.NotLoaded{__cardinality__: :one} = author
@@ -523,7 +513,7 @@ defmodule Ecto.SchemaTest do
            %Ecto.Association.HasThrough{field: :comment_main_author, owner: AssocSchema, cardinality: :one,
                                          through: [:comment, :main_author], owner_key: :comment_id}
 
-    refute Map.has_key?(AssocSchema.__changeset__, :comment_main_author)
+    refute Map.has_key?(AssocSchema.__changeset__(), :comment_main_author)
 
     author = (%AssocSchema{}).comment_main_author
     assert %Ecto.Association.NotLoaded{} = author
@@ -537,7 +527,7 @@ defmodule Ecto.SchemaTest do
        on_replace: :raise, defaults: []}
 
     assert AssocSchema.__schema__(:association, :comment) == struct
-    assert AssocSchema.__changeset__.comment == {:assoc, struct}
+    assert AssocSchema.__changeset__().comment == {:assoc, struct}
 
     comment = (%AssocSchema{}).comment
     assert %Ecto.Association.NotLoaded{} = comment
@@ -551,7 +541,7 @@ defmodule Ecto.SchemaTest do
        queryable: {"post_summary", Summary}, on_replace: :raise, defaults: []}
 
     assert AssocSchema.__schema__(:association, :summary) == struct
-    assert AssocSchema.__changeset__.summary == {:assoc, struct}
+    assert AssocSchema.__changeset__().summary == {:assoc, struct}
 
     comment = (%AssocSchema{}).comment
     assert %Ecto.Association.NotLoaded{} = comment

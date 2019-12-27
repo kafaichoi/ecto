@@ -749,7 +749,7 @@ defmodule Ecto.Query do
   Notice we have created a `p` variable to reference the query's
   original data source. This assumes that the original query
   only had one source. When the given query has more than one source,
-  positonal or named bindings may be used to access the additional sources.
+  positional or named bindings may be used to access the additional sources.
 
       def published_multi(query) do
         from [p,o] in query,
@@ -1004,6 +1004,7 @@ defmodule Ecto.Query do
   @join_opts [:on | @from_join_opts]
 
   defmacro join(query, qual, binding \\ [], expr, opts \\ [])
+  defmacro join(query, qual, binding, expr, opts)
            when is_list(binding) and is_list(opts) do
     {t, on, as, prefix, hints} = collect_on(opts, nil, nil, nil, nil)
 
@@ -1017,11 +1018,30 @@ defmodule Ecto.Query do
     |> elem(0)
   end
 
+  defmacro join(_query, _qual, binding, _expr, opts) when is_list(opts) do
+    raise ArgumentError, "invalid binding passed to Ecto.Query.join/5, should be " <>
+                           "list of variables, got: #{Macro.to_string(binding)}"
+  end
+
   @doc """
   A common table expression (CTE) also known as WITH expression.
 
-  `name` must be a compile-time literal string that is being used as the table name to join
-  the CTE in the main query or in the recursive CTE.
+  `name` must be a compile-time literal string that is being used
+  as the table name to join the CTE in the main query or in the
+  recursive CTE.
+
+  **IMPORTANT!** Beware of using CTEs. In raw SQL, CTEs can be
+  used as a mechanism to organize queries, but said mechanism
+  has no purpose in Ecto since Ecto queries are composable by
+  definition. In other words, if you need to break a large query
+  into parts, use all of the functionality in Elixir and in this
+  module to structure your code. Furthermore, breaking a query
+  into CTEs can negatively impact performance, as the database
+  may not optimize efficiently across CTEs. The main use case
+  for CTEs in Ecto is to provide recursive definitions, which
+  we outline in the following section. Non-recursive CTEs can
+  often be written as joins or subqueries, which provide better
+  performance.
 
   ## Options
 
@@ -1031,11 +1051,11 @@ defmodule Ecto.Query do
 
   Use `recursive_ctes/2` to enable recursive mode for CTEs.
 
-  In the CTE query itself use the same table name to leverage recursion that has been passed
-  to `name` argument. Make sure to write a stop condition to avoid infinite recursion loop.
-
-  Generally speaking, you should only use CTEs for writing recursive queries. Non-recursive
-  CTEs can often be written as joins or subqueries, which provide better performance.
+  In the CTE query itself use the same table name to leverage
+  recursion that has been passed to the `name` argument. Make sure
+  to write a stop condition to avoid infinite recursion loop.
+  Generally speaking, you should only use CTEs in Ecto for
+  writing recursive queries.
 
   ## Expression examples
 
@@ -1067,7 +1087,7 @@ defmodule Ecto.Query do
       |> with_cte("category_tree", as: ^category_tree_query)
       |> join(:left, [c], p in assoc(c, :products))
       |> group_by([c], c.id)
-      |> select:([c, p], %{c | products_count: count(p.id)})
+      |> select([c, p], %{c | products_count: count(p.id)})
 
   It's also possible to pass a raw SQL fragment:
 
@@ -1083,6 +1103,17 @@ defmodule Ecto.Query do
       |> join(:inner, [p], c in "category_tree", on: c.id == p.category_id)
 
   Keyword syntax is not supported for this feature.
+
+  ## Limitation: CTEs on schemas wth source fields
+
+  Ecto allows developers to say that a table in their Ecto schema
+  map to a different column in their database:
+
+      field :group_id, :integer, source: :iGroupId
+
+  At the moment, using a schema with source fields in CTE may emit
+  invalid queries. If you are running into such scenarios, your best
+  option is to use a fragment as your CTE.
   """
   defmacro with_cte(query, name, as: with_query) do
     Builder.CTE.build(query, name, with_query, __CALLER__)
@@ -1755,7 +1786,7 @@ defmodule Ecto.Query do
   @doc """
   Preloads the associations into the result set.
 
-  Imagine you have an schema `Post` with a `has_many :comments`
+  Imagine you have a schema `Post` with a `has_many :comments`
   association and you execute the following query:
 
       Repo.all from p in Post, preload: [:comments]
@@ -1859,7 +1890,7 @@ defmodule Ecto.Query do
       # Returns all posts, their associated comments, and the associated
       # likes for those comments.
       from(p in Post,
-        preload: [:comments, comments: :likes],
+        preload: [comments: :likes],
         select: p)
 
   ## Expressions examples
