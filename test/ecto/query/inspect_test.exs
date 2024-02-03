@@ -38,6 +38,9 @@ defmodule Ecto.Query.InspectTest do
     assert inspect(dynamic([a, b, ..., c, d], a.foo == b.bar and c.foo == d.bar)) ==
            "dynamic([a, b, ..., c, d], a.foo == b.bar and c.foo == d.bar)"
 
+    assert inspect(dynamic([comments: c], c.bar == ^1)) ==
+           "dynamic([comments: c], c.bar == ^1)"
+
     dynamic = dynamic([p], p.bar == ^1)
     assert inspect(dynamic([p], ^dynamic and p.foo == ^0)) ==
            "dynamic([p], p.bar == ^1 and p.foo == ^0)"
@@ -45,6 +48,11 @@ defmodule Ecto.Query.InspectTest do
     dynamic = dynamic([o, b], b.user_id == ^1 or ^false)
     assert inspect(dynamic([o], o.type == ^2 and ^dynamic)) ==
            "dynamic([o, b], o.type == ^2 and (b.user_id == ^1 or ^false))"
+
+    sq = from(Post, [])
+    dynamic = dynamic([o, b], b.user_id == ^1 or b.user_id in subquery(sq))
+    assert inspect(dynamic([o], o.type == ^2 and ^dynamic)) ==
+           "dynamic([o, b], o.type == ^2 and (b.user_id == ^1 or b.user_id in subquery(#Ecto.Query<from p0 in Inspect.Post>)))"
   end
 
   test "invalid query" do
@@ -91,7 +99,7 @@ defmodule Ecto.Query.InspectTest do
     assert query |> inspect() |> Inspect.Algebra.format(80) |> to_string() ==
       ~s{#Ecto.Query<from p0 in "products", join: t1 in "tree", on: t1.id == p0.category_id>\n} <>
       ~s{|> recursive_ctes(true)\n} <>
-      ~s{|> with_cte("tree", as: } <>
+      ~s{|> with_cte("tree", materialized: nil, as: } <>
       ~s{#Ecto.Query<from c0 in "categories", } <>
       ~s{where: is_nil(c0.parent_id), } <>
       ~s{union_all: (from c0 in "categories",\n  } <>
@@ -101,8 +109,15 @@ defmodule Ecto.Query.InspectTest do
       ~s{select: %\{id: c0.id, depth: fragment("1")\}>)}
   end
 
+  test "cte with fragments" do
+    assert with_cte("foo", "foo", as: fragment("select 1 as bar"))
+           |> inspect() |> Inspect.Algebra.format(80) |> to_string() ==
+      ~s{#Ecto.Query<from f0 in "foo">\n} <>
+      ~s{|> with_cte("foo", materialized: nil, as: fragment("select 1 as bar"))}
+  end
+
   test "join" do
-    assert i(from(x in Post, join: y in Comment)) ==
+    assert i(from(x in Post, join: y in Comment, on: true)) ==
            ~s{from p0 in Inspect.Post, join: c1 in Inspect.Comment, on: true}
 
     assert i(from(x in Post, join: y in Comment, on: x.id == y.id)) ==
@@ -113,6 +128,25 @@ defmodule Ecto.Query.InspectTest do
 
     assert i(from(x in Post, full_join: y in {"user_comments", Comment}, on: x.id == y.id)) ==
            ~s[from p0 in Inspect.Post, full_join: c1 in {"user_comments", Inspect.Comment}, on: p0.id == c1.id]
+
+    assert i(from(x in Post, left_lateral_join: y in Comment, on: x.id == y.id)) ==
+           ~s{from p0 in Inspect.Post, left_lateral_join: c1 in Inspect.Comment, on: p0.id == c1.id}
+
+    assert i(from(x in Post, inner_lateral_join: y in Comment, on: x.id == y.id)) ==
+           ~s{from p0 in Inspect.Post, inner_lateral_join: c1 in Inspect.Comment, on: p0.id == c1.id}
+
+    assert i(from(x in Post, cross_lateral_join: y in Comment, on: x.id == y.id)) ==
+           ~s{from p0 in Inspect.Post, cross_lateral_join: c1 in Inspect.Comment, on: p0.id == c1.id}
+
+    assert i(from(x in Post, array_join: y in "arr")) ==
+           ~s{from p0 in Inspect.Post, array_join: a1 in "arr", on: true}
+
+    assert i(from(x in Post, left_array_join: y in "arr")) ==
+           ~s{from p0 in Inspect.Post, left_array_join: a1 in "arr", on: true}
+
+    binding = :comments
+    assert i(from(x in Post, left_join: y in assoc(x, ^binding), as: ^binding)) ==
+           ~s{from p0 in Inspect.Post, left_join: c1 in assoc(p0, :comments), as: :comments}
 
     assert i(from(x in Post, left_join: y in assoc(x, :comments))) ==
            ~s{from p0 in Inspect.Post, left_join: c1 in assoc(p0, :comments)}
@@ -164,6 +198,12 @@ defmodule Ecto.Query.InspectTest do
   test "where" do
     assert i(from(x in Post, where: x.foo == x.bar, where: true)) ==
            ~s{from p0 in Inspect.Post, where: p0.foo == p0.bar, where: true}
+  end
+
+  test "where in subquery" do
+    s = from(x in Post, where: x.bar == ^"1", select: x.foo)
+    assert i(from(x in Post, where: x.foo in subquery(s))) ==
+          ~s{from p0 in Inspect.Post, where: p0.foo in subquery(#Ecto.Query<from p0 in Inspect.Post, where: p0.bar == ^"1", select: p0.foo>)}
   end
 
   test "group by" do
@@ -247,27 +287,64 @@ defmodule Ecto.Query.InspectTest do
            ~s{from p0 in Inspect.Post, lock: "FOOBAR"}
   end
 
-  test "preload" do
-    assert i(from(x in Post, preload: :comments)) ==
-           ~s"from p0 in Inspect.Post, preload: [:comments]"
+  # TODO: AST is represented as string differently on versions pre 1.13
+  if Version.match?(System.version(), ">= 1.13.0-dev") do
+    test "preload" do
+      assert i(from(x in Post, preload: :comments)) ==
+            ~s"from p0 in Inspect.Post, preload: [:comments]"
 
-    assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: y])) ==
-           ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: c1]"
+      assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: y])) ==
+            ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: c1]"
 
-    assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: {y, post: x}])) ==
-           ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: {c1, [post: p0]}]"
+      assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: {y, post: x}])) ==
+            ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: {c1, post: p0}]"
+    end
+  else
+    test "preload" do
+      assert i(from(x in Post, preload: :comments)) ==
+            ~s"from p0 in Inspect.Post, preload: [:comments]"
+
+      assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: y])) ==
+            ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: c1]"
+
+      assert i(from(x in Post, join: y in assoc(x, :comments), preload: [comments: {y, post: x}])) ==
+            ~s"from p0 in Inspect.Post, join: c1 in assoc(p0, :comments), preload: [comments: {c1, [post: p0]}]"
+    end
   end
 
   test "fragments" do
     value = "foobar"
+
     assert i(from(x in Post, where: fragment("downcase(?) == ?", x.id, ^value))) ==
-           ~s{from p0 in Inspect.Post, where: fragment("downcase(?) == ?", p0.id, ^"foobar")}
+             ~s{from p0 in Inspect.Post, where: fragment("downcase(?) == ?", p0.id, ^"foobar")}
 
     assert i(from(x in Post, where: fragment(^[title: [foo: "foobar"]]))) ==
-           ~s{from p0 in Inspect.Post, where: fragment(title: [foo: "foobar"])}
+             ~s{from p0 in Inspect.Post, where: fragment(title: [foo: "foobar"])}
 
     assert i(from(x in Post, where: fragment(title: [foo: ^value]))) ==
-      ~s{from p0 in Inspect.Post, where: fragment(title: [foo: ^"foobar"])}
+             ~s{from p0 in Inspect.Post, where: fragment(title: [foo: ^"foobar"])}
+
+    assert i(from(x in fragment("SELECT ? as title", ^value))) ==
+             ~s{from f0 in fragment("SELECT ? as title", ^"foobar")}
+
+    assert i(
+             from(x in fragment("SELECT ? as title", ^value),
+               join: y in fragment("SELECT ? as title", ^value),
+               on: x.title == y.title
+             )
+           ) ==
+             ~s{from f0 in fragment("SELECT ? as title", ^"foobar"), join: f1 in fragment(\"SELECT ? as title\", ^\"foobar\"), on: f0.title == f1.title}
+  end
+
+  test "json_extract_path" do
+    assert i(from(x in Post, select: json_extract_path(x.meta, ["author"]))) ==
+             ~s{from p0 in Inspect.Post, select: p0.meta[\"author\"]}
+
+    assert i(from(x in Post, select: x.meta["author"])) ==
+             ~s{from p0 in Inspect.Post, select: p0.meta[\"author\"]}
+
+    assert i(from(x in Post, select: x.meta["author"]["name"])) ==
+             ~s{from p0 in Inspect.Post, select: p0.meta[\"author\"][\"name\"]}
   end
 
   test "inspect all" do
@@ -316,13 +393,25 @@ defmodule Ecto.Query.InspectTest do
     ) == string
   end
 
-  test "container values" do
-    assert i(from(Post, select: <<1, 2, 3>>)) ==
-           "from p0 in Inspect.Post, select: <<1, 2, 3>>"
+  # TODO: AST is represented as string differently on versions pre 1.13
+  if Version.match?(System.version(), ">= 1.13.0-dev") do
+    test "container values" do
+      assert i(from(Post, select: <<1, 2, 3>>)) ==
+             "from p0 in Inspect.Post, select: \"\\x01\\x02\\x03\""
 
-    foo = <<1, 2, 3>>
-    assert i(from(p in Post, select: {p, ^foo})) ==
-           "from p0 in Inspect.Post, select: {p0, ^<<1, 2, 3>>}"
+      foo = <<1, 2, 3>>
+      assert i(from(p in Post, select: {p, ^foo})) ==
+             "from p0 in Inspect.Post, select: {p0, ^\"\\x01\\x02\\x03\"}"
+    end
+  else
+    test "container values" do
+      assert i(from(Post, select: <<1, 2, 3>>)) ==
+             "from p0 in Inspect.Post, select: <<1, 2, 3>>"
+
+      foo = <<1, 2, 3>>
+      assert i(from(p in Post, select: {p, ^foo})) ==
+             "from p0 in Inspect.Post, select: {p0, ^<<1, 2, 3>>}"
+    end
   end
 
   test "select" do
@@ -375,13 +464,54 @@ defmodule Ecto.Query.InspectTest do
     assert i(query) == ~s{from p0 in Inspect.Post, select: type(^..., :integer)}
   end
 
+  test "subquery with selected_as/2 after planner" do
+    query =
+      from(x in Post, select: %{visits: selected_as(x.visits, :visits2)})
+      |> subquery()
+      |> plan
+
+    assert i(query) =~ ~s"select: %{visits: selected_as(p0.visits, :visits2)})"
+  end
+
+  defmodule MyParameterizedType do
+    use Ecto.ParameterizedType
+
+    def init(opts), do: Keyword.fetch!(opts, :param)
+    def type(_), do: :custom
+    def load(_, _, _), do: {:ok, :load}
+    def dump(_, _, _),  do: {:ok, :dump}
+    def cast(_, _),  do: {:ok, :cast}
+    def equal?(true, _, _), do: true
+    def equal?(_, _, _), do: false
+    def embed_as(_, _), do: :self
+  end
+
+  test "parameterized types" do
+    query = from(x in Post, select: type(^"foo", ^Ecto.ParameterizedType.init(MyParameterizedType, param: :foo)))
+    assert i(query) == ~s<from p0 in Inspect.Post, select: type(^"foo", {:parameterized, Ecto.Query.InspectTest.MyParameterizedType, :foo})>
+  end
+
+  test "parameterized types after planner" do
+    query = from(x in Post, select: type(^"foo", ^Ecto.ParameterizedType.init(MyParameterizedType, param: :foo))) |> plan()
+    assert i(query) == ~s<from p0 in Inspect.Post, select: type(^..., {:parameterized, Ecto.Query.InspectTest.MyParameterizedType, :foo})>
+  end
+
+  test "values lists" do
+    values_list = [%{a: 1, b: 2, c: 3}]
+    types = %{a: :integer, b: :integer, c: :integer}
+    fields = types |> Map.keys() |> Enum.map_join(", ", & &1)
+    query = from v in values(values_list, types)
+    assert i(query) == "from v0 in values (#{fields})"
+    assert i(plan(query)) == "from v0 in values (#{fields})"
+  end
+
   def plan(query) do
-    {query, _} = Ecto.Adapter.Queryable.plan_query(:all, Ecto.TestAdapter, query)
+    {query, _, _} = Ecto.Adapter.Queryable.plan_query(:all, Ecto.TestAdapter, query)
     query
   end
 
   def i(query) do
-    assert "#Ecto.Query<" <> rest = inspect query
+    assert "#Ecto.Query<" <> rest = inspect(query, safe: false)
     size = byte_size(rest)
     assert ">" = :binary.part(rest, size - 1, 1)
     :binary.part(rest, 0, size - 1)

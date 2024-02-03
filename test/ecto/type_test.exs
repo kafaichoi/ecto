@@ -20,6 +20,33 @@ defmodule Ecto.TypeTest do
     def cast(_),   do: {:ok, :cast}
   end
 
+  defmodule CustomParameterizedTypeWithFormat do
+    use Ecto.ParameterizedType
+
+    def init(_options), do: :init
+    def type(_), do: :custom
+    def load(_, _, _), do: {:ok, :load}
+    def dump(_, _, _),  do: {:ok, :dump}
+    def cast(_, _),  do: {:ok, :cast}
+    def equal?(true, _, _), do: true
+    def equal?(_, _, _), do: false
+    def embed_as(_, %{embed: embed}), do: embed
+    def format(_params), do: "#CustomParameterizedTypeWithFormat<:custom>"
+  end
+
+  defmodule CustomParameterizedTypeWithoutFormat do
+    use Ecto.ParameterizedType
+
+    def init(_options), do: :init
+    def type(_), do: :custom
+    def load(_, _, _), do: {:ok, :load}
+    def dump(_, _, _),  do: {:ok, :dump}
+    def cast(_, _),  do: {:ok, :cast}
+    def equal?(true, _, _), do: true
+    def equal?(_, _, _), do: false
+    def embed_as(_, %{embed: embed}), do: embed
+  end
+
   defmodule Schema do
     use Ecto.Schema
 
@@ -44,6 +71,17 @@ defmodule Ecto.TypeTest do
     assert embed_as(:integer, :json) == :self
     assert embed_as(Custom, :json) == :dump
     assert embed_as(CustomAny, :json) == :self
+  end
+
+  test "embedded_load" do
+    assert embedded_load(:decimal, "1", :json) == {:ok, Decimal.new("1")}
+    assert embedded_load(:decimal, "oops", :json) == :error
+    assert embedded_load(Custom, :value, :json) == {:ok, :load}
+  end
+
+  test "embedded_dump" do
+    assert embedded_dump(:decimal, Decimal.new("1"), :json) == {:ok, Decimal.new("1")}
+    assert embedded_dump(Custom, :value, :json) == {:ok, :dump}
   end
 
   test "custom types" do
@@ -73,6 +111,11 @@ defmodule Ecto.TypeTest do
     assert dump({:map, :integer}, %{"a" => 1, "b" => 2}) == {:ok, %{"a" => 1, "b" => 2}}
     assert cast({:map, :integer}, %{"a" => "1", "b" => "2"}) == {:ok, %{"a" => 1, "b" => 2}}
 
+    assert load({:map, :integer}, %{"a" => 1, "b" => nil}) == {:ok, %{"a" => 1, "b" => nil}}
+    assert load({:map, :string}, %{"a" => "1", "b" => nil}) == {:ok, %{"a" => "1", "b" => nil}}
+    assert dump({:map, :integer}, %{"a" => 1, "b" => nil}) == {:ok, %{"a" => 1, "b" => nil}}
+    assert cast({:map, :integer}, %{"a" => "1", "b" => nil}) == {:ok, %{"a" => 1, "b" => nil}}
+
     assert load({:map, {:array, :integer}}, %{"a" => [0, 0], "b" => [1, 1]}) == {:ok, %{"a" => [0, 0], "b" => [1, 1]}}
     assert dump({:map, {:array, :integer}}, %{"a" => [0, 0], "b" => [1, 1]}) == {:ok, %{"a" => [0, 0], "b" => [1, 1]}}
     assert cast({:map, {:array, :integer}}, %{"a" => [0, 0], "b" => [1, 1]}) == {:ok, %{"a" => [0, 0], "b" => [1, 1]}}
@@ -84,6 +127,17 @@ defmodule Ecto.TypeTest do
     assert load({:map, :integer}, 1) == :error
     assert dump({:map, :integer}, 1) == :error
     assert cast({:map, :integer}, 1) == :error
+  end
+
+  test "array" do
+    assert load({:array, :integer}, [1]) == {:ok, [1]}
+    assert load({:array, :integer}, [1, nil]) == {:ok, [1, nil]}
+    assert dump({:array, :integer}, [2]) == {:ok, [2]}
+    assert dump({:array, :integer}, [2, nil]) == {:ok, [2, nil]}
+    assert cast({:array, :integer}, [3]) == {:ok, [3]}
+    assert cast({:array, :integer}, ["3"]) == {:ok, [3]}
+    assert cast({:array, :integer}, [3, nil]) == {:ok, [3, nil]}
+    assert cast({:array, :integer}, ["3", nil]) == {:ok, [3, nil]}
   end
 
   test "custom types with array" do
@@ -162,14 +216,19 @@ defmodule Ecto.TypeTest do
     refute match?(:string, {:param, :any_datetime})
   end
 
+  test "integer" do
+    assert cast(:integer, String.duplicate("1", 64)) == :error
+  end
+
   test "decimal" do
     assert cast(:decimal, "1.0") == {:ok, Decimal.new("1.0")}
     assert cast(:decimal, 1.0) == {:ok, Decimal.new("1.0")}
     assert cast(:decimal, 1) == {:ok, Decimal.new("1")}
     assert cast(:decimal, Decimal.new("1")) == {:ok, Decimal.new("1")}
     assert cast(:decimal, "nan") == :error
+    assert cast(:decimal, "1.0bad") == :error
 
-    assert_raise ArgumentError, ~r"#Decimal<NaN> is not allowed for type :decimal", fn ->
+    assert_raise ArgumentError, ~r"Decimal.new\(\"NaN\"\) is not allowed for type :decimal", fn ->
       cast(:decimal, Decimal.new("NaN"))
     end
 
@@ -179,13 +238,18 @@ defmodule Ecto.TypeTest do
     assert dump(:decimal, "1.0") == :error
     assert dump(:decimal, "bad") == :error
 
-    assert_raise ArgumentError, ~r"#Decimal<NaN> is not allowed for type :decimal", fn ->
+    assert_raise ArgumentError, ~r"Decimal.new\(\"NaN\"\) is not allowed for type :decimal", fn ->
       dump(:decimal, Decimal.new("nan"))
     end
+
+    assert load(:decimal, 1) == {:ok, Decimal.new(1)}
+    assert load(:decimal, 1.0) == {:ok, Decimal.new("1.0")}
+    assert load(:decimal, Decimal.new("1.0")) == {:ok, Decimal.new("1.0")}
+    assert load(:decimal, "1.0") == :error
   end
 
   test "maybe" do
-    assert dump({:maybe, :decimal}, 1) == {:ok, Decimal.new(1)}
+    assert dump({:maybe, :decimal}, Decimal.new(1)) == {:ok, Decimal.new(1)}
     assert dump({:maybe, :decimal}, "not decimal") == {:ok, "not decimal"}
 
     assert load({:maybe, :decimal}, 1) == {:ok, Decimal.new(1)}
@@ -197,19 +261,18 @@ defmodule Ecto.TypeTest do
 
   describe "embeds" do
     @uuid_string "bfe0888c-5c59-4bb3-adfd-71f0b85d3db7"
-    @uuid_binary <<191, 224, 136, 140, 92, 89, 75, 179, 173, 253, 113, 240, 184, 93, 61, 183>>
 
     test "one" do
       embed = %Ecto.Embedded{field: :embed, cardinality: :one,
                              owner: __MODULE__, related: Schema}
-      type  = {:embed, embed}
+      type  = {:parameterized, Ecto.Embedded, embed}
 
       assert {:ok, %Schema{id: @uuid_string, a: 1, c: 0}} =
-             adapter_load(Ecto.TestAdapter, type, %{"id" => @uuid_binary, "abc" => 1})
+             adapter_load(Ecto.TestAdapter, type, %{"id" => @uuid_string, "abc" => 1})
       assert {:ok, nil} == adapter_load(Ecto.TestAdapter, type, nil)
       assert :error == adapter_load(Ecto.TestAdapter, type, 1)
 
-      assert {:ok, %{abc: 1, c: 0, id: @uuid_binary}} ==
+      assert {:ok, %{abc: 1, c: 0, id: @uuid_string}} ==
              adapter_dump(Ecto.TestAdapter, type, %Schema{id: @uuid_string, a: 1})
       assert {:ok, nil} = adapter_dump(Ecto.TestAdapter, type, nil)
       assert :error = adapter_dump(Ecto.TestAdapter, type, 1)
@@ -217,20 +280,19 @@ defmodule Ecto.TypeTest do
       assert :error == cast(type, %{"a" => 1})
       assert cast(type, %Schema{}) == {:ok, %Schema{}}
       assert cast(type, nil) == {:ok, nil}
-      assert match?(:any, type)
     end
 
     test "many" do
       embed = %Ecto.Embedded{field: :embed, cardinality: :many,
                              owner: __MODULE__, related: Schema}
-      type  = {:embed, embed}
+      type  = {:parameterized, Ecto.Embedded, embed}
 
       assert {:ok, [%Schema{id: @uuid_string, a: 1, c: 0}]} =
-             adapter_load(Ecto.TestAdapter, type, [%{"id" => @uuid_binary, "abc" => 1}])
+             adapter_load(Ecto.TestAdapter, type, [%{"id" => @uuid_string, "abc" => 1}])
       assert {:ok, []} == adapter_load(Ecto.TestAdapter, type, nil)
       assert :error == adapter_load(Ecto.TestAdapter, type, 1)
 
-      assert {:ok, [%{id: @uuid_binary, abc: 1, c: 0}]} ==
+      assert {:ok, [%{id: @uuid_string, abc: 1, c: 0}]} ==
              adapter_dump(Ecto.TestAdapter, type, [%Schema{id: @uuid_string, a: 1}])
       assert {:ok, nil} = adapter_dump(Ecto.TestAdapter, type, nil)
       assert :error = adapter_dump(Ecto.TestAdapter, type, 1)
@@ -238,7 +300,6 @@ defmodule Ecto.TypeTest do
       assert cast(type, [%{"abc" => 1}]) == :error
       assert cast(type, [%Schema{}]) == {:ok, [%Schema{}]}
       assert cast(type, []) == {:ok, []}
-      assert match?({:array, :any}, type)
     end
   end
 
@@ -519,15 +580,13 @@ defmodule Ecto.TypeTest do
       assert Ecto.Type.cast(:naive_datetime, 1) == :error
     end
 
-    if Version.match?(System.version(), ">= 1.7.0") do
-      test "cast negative datetime" do
-        datetime = NaiveDateTime.from_iso8601!("-2015-01-23 23:50:07Z")
-        datetime_zero = NaiveDateTime.from_iso8601!("-2015-01-23 23:50:00Z")
+    test "cast negative datetime" do
+      datetime = NaiveDateTime.from_iso8601!("-2015-01-23 23:50:07Z")
+      datetime_zero = NaiveDateTime.from_iso8601!("-2015-01-23 23:50:00Z")
 
-        assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50") == {:ok, datetime_zero}
-        assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50:07") == {:ok, datetime}
-        assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50:07bad") == :error
-      end
+      assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50") == {:ok, datetime_zero}
+      assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50:07") == {:ok, datetime}
+      assert Ecto.Type.cast(:naive_datetime, "-2015-01-23 23:50:07bad") == :error
     end
 
     test "dump" do
@@ -640,10 +699,10 @@ defmodule Ecto.TypeTest do
     end
   end
 
-  @datetime DateTime.from_unix!(1422057007, :second)
-  @datetime_zero DateTime.from_unix!(1422057000, :second)
-  @datetime_zero_usec DateTime.from_unix!(1422057000000000, :microsecond)
-  @datetime_usec DateTime.from_unix!(1422057007008000, :microsecond)
+  @datetime ~U[2015-01-23 23:50:07Z]
+  @datetime_zero ~U[2015-01-23 23:50:00Z]
+  @datetime_zero_usec ~U[2015-01-23 23:50:00.000000Z]
+  @datetime_usec ~U[2015-01-23 23:50:07.008000Z]
   @datetime_usec_tz %DateTime{
     calendar: Calendar.ISO,
     day: 24,
@@ -658,8 +717,8 @@ defmodule Ecto.TypeTest do
     year: 2015,
     zone_abbr: "CET"
   }
-  @datetime_leapyear DateTime.from_unix!(951868207, :second)
-  @datetime_leapyear_usec DateTime.from_unix!(951868207008000, :microsecond)
+  @datetime_leapyear ~U[2000-02-29 23:50:07Z]
+  @datetime_leapyear_usec ~U[2000-02-29 23:50:07.008000Z]
 
   describe "utc_datetime" do
     test "cast" do
@@ -729,21 +788,16 @@ defmodule Ecto.TypeTest do
       assert Ecto.Type.cast(:utc_datetime, 1) == :error
     end
 
-    if Version.match?(System.version(), ">= 1.7.0") do
-      test "cast negative datetime" do
-        {:ok, datetime, 0} = DateTime.from_iso8601("-2015-01-23 23:50:07Z")
-        {:ok, datetime_zero, 0} = DateTime.from_iso8601("-2015-01-23 23:50:00Z")
-
-        assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50") == {:ok, datetime_zero}
-        assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50:07") == {:ok, datetime}
-        assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50:07bad") == :error
-      end
+    test "cast negative datetime" do
+      assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50") == {:ok, ~U[-2015-01-23 23:50:00Z]}
+      assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50:07") == {:ok, ~U[-2015-01-23 23:50:07Z]}
+      assert Ecto.Type.cast(:utc_datetime, "-2015-01-23 23:50:07bad") == :error
     end
 
     test "dump" do
-      assert Ecto.Type.dump(:utc_datetime, @datetime) == DateTime.from_naive(~N[2015-01-23 23:50:07], "Etc/UTC")
-      assert Ecto.Type.dump(:utc_datetime, @datetime_zero) == DateTime.from_naive(~N[2015-01-23 23:50:00], "Etc/UTC")
-      assert Ecto.Type.dump(:utc_datetime, @datetime_leapyear) == DateTime.from_naive(~N[2000-02-29 23:50:07], "Etc/UTC")
+      assert Ecto.Type.dump(:utc_datetime, @datetime) == {:ok, @datetime}
+      assert Ecto.Type.dump(:utc_datetime, @datetime_zero) == {:ok, @datetime_zero}
+      assert Ecto.Type.dump(:utc_datetime, @datetime_leapyear) == {:ok, @datetime_leapyear}
 
       assert_raise ArgumentError, ~r":utc_datetime expects microseconds to be empty", fn ->
         Ecto.Type.dump(:utc_datetime, @datetime_usec)
@@ -922,11 +976,6 @@ defmodule Ecto.TypeTest do
       refute Ecto.Type.equal?(Custom, false, false)
     end
 
-    test "nil type" do
-      assert Ecto.Type.equal?(nil, 1, 1.0)
-      refute Ecto.Type.equal?(nil, 1, 2)
-    end
-
     test "nil values" do
       assert Ecto.Type.equal?(:any, nil, nil)
       assert Ecto.Type.equal?(:boolean, nil, nil)
@@ -954,11 +1003,37 @@ defmodule Ecto.TypeTest do
 
       assert Ecto.Type.equal?(Custom, nil, nil)
     end
+  end
 
-    test "bad type" do
-      assert_raise ArgumentError, ~r"cannot use :foo as Ecto.Type", fn ->
-        Ecto.Type.equal?(:foo, 1, 1.0)
-      end
+  describe "format/1" do
+    test "parameterized type with format/1 defined" do
+      params = %{}
+      assert Ecto.Type.format({:parameterized, CustomParameterizedTypeWithFormat, params}) == "#CustomParameterizedTypeWithFormat<:custom>"
+    end
+
+    test "parameterized type without format/1 defined" do
+      type = {:parameterized, CustomParameterizedTypeWithoutFormat, %{key: :value}}
+      assert Ecto.Type.format(type) == "#Ecto.TypeTest.CustomParameterizedTypeWithoutFormat<%{key: :value}>"
+    end
+
+    test "composite parameterized type" do
+      params = %{}
+      with_format_defined = {:parameterized, CustomParameterizedTypeWithFormat, params}
+      without_format_defined = {:parameterized, CustomParameterizedTypeWithoutFormat, params}
+
+      assert Ecto.Type.format({:array, with_format_defined}) == "{:array, #CustomParameterizedTypeWithFormat<:custom>}"
+      assert Ecto.Type.format({:array, without_format_defined}) == "{:array, #Ecto.TypeTest.CustomParameterizedTypeWithoutFormat<%{}>}"
+    end
+
+    test "non parameterized type" do
+      # fallback to `inspect(type)`
+      assert Ecto.Type.format(:id) == ":id"
+    end
+
+    test "composite non parameterized type" do
+      # fallback to `inspect(type)`
+      assert Ecto.Type.format({:array, :id}) == "{:array, :id}"
+      assert Ecto.Type.format({:array, {:map, :integer}}) == "{:array, {:map, :integer}}"
     end
   end
 

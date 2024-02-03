@@ -16,8 +16,13 @@ defmodule Ecto.Changeset.BelongsToTest do
       belongs_to :profile, {"authors_profiles", Profile},
         on_replace: :delete, defaults: [name: "default"]
       belongs_to :raise_profile, Profile, on_replace: :raise
-      belongs_to :invalid_profile, Profile, on_replace: :mark_as_invalid
-      belongs_to :update_profile, Profile, on_replace: :update
+      belongs_to :invalid_profile, Profile, on_replace: :mark_as_invalid, defaults: :send_to_self
+      belongs_to :update_profile, Profile, on_replace: :update, defaults: {__MODULE__, :send_to_self, [:extra]}
+    end
+
+    def send_to_self(struct, owner, extra \\ :default) do
+      send(self(), {:defaults, struct, owner, extra})
+      %{struct | id: 13}
     end
   end
 
@@ -193,7 +198,6 @@ defmodule Ecto.Changeset.BelongsToTest do
     assert (changeset.types.profile |> elem(1)).on_cast == &Profile.optional_changeset/2
 
     profile = changeset.changes.profile
-    assert profile.data.name == "default"
     assert profile.data.__meta__.source == "authors_profiles"
     assert profile.changes == %{}
     assert profile.errors  == []
@@ -261,6 +265,32 @@ defmodule Ecto.Changeset.BelongsToTest do
     assert changeset.changes == %{}
     assert changeset.errors == [invalid_profile: {"a custom message", [validation: :assoc, type: :map]}]
     refute changeset.valid?
+  end
+
+  test "cast belongs_to with keyword defaults" do
+    {:ok, schema} = TestRepo.insert(%Author{title: "Title", profile: nil})
+
+    changeset = cast(schema, %{"profile" => %{id: 1}}, :profile)
+    assert changeset.changes.profile.data.name == "default"
+    assert changeset.changes.profile.changes == %{id: 1}
+  end
+
+  test "cast belongs_to with atom defaults" do
+    {:ok, schema} = TestRepo.insert(%Author{title: "Title", invalid_profile: nil})
+
+    changeset = cast(schema, %{"invalid_profile" => %{name: "Jose"}}, :invalid_profile)
+    assert_received {:defaults, %Profile{id: nil}, %Author{title: "Title"}, :default}
+    assert changeset.changes.invalid_profile.data.id == 13
+    assert changeset.changes.invalid_profile.changes == %{name: "Jose"}
+  end
+
+  test "cast belongs_to with MFA defaults" do
+    {:ok, schema} = TestRepo.insert(%Author{title: "Title", update_profile: nil})
+
+    changeset = cast(schema, %{"update_profile" => %{name: "Jose"}}, :update_profile)
+    assert_received {:defaults, %Profile{id: nil}, %Author{title: "Title"}, :extra}
+    assert changeset.changes.update_profile.data.id == 13
+    assert changeset.changes.update_profile.changes == %{name: "Jose"}
   end
 
   test "cast belongs_to with on_replace: :update" do
@@ -442,8 +472,13 @@ defmodule Ecto.Changeset.BelongsToTest do
   test "put_assoc/4" do
     base_changeset = Changeset.change(%Author{})
 
+    changeset = Changeset.put_assoc(base_changeset, :profile, %{name: "michal"})
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.data.__meta__.source == "authors_profiles"
+
     changeset = Changeset.put_assoc(base_changeset, :profile, %Profile{name: "michal"})
     assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.data.__meta__.source == "profiles"
 
     base_changeset = Changeset.change(%Author{profile: %Profile{name: "michal"}})
     empty_update_changeset = Changeset.change(%Profile{name: "michal"})
@@ -477,7 +512,7 @@ defmodule Ecto.Changeset.BelongsToTest do
 
     assert Map.has_key?(changeset.changes, :profile)
 
-    # On emptuy with change
+    # On empty with change
     changeset =
       %Author{profile: nil}
       |> Changeset.change(profile: %Profile{})
@@ -497,7 +532,7 @@ defmodule Ecto.Changeset.BelongsToTest do
     refute Map.has_key?(changeset.changes, :profile)
   end
 
-  test "get_field/3, fetch_field/2 with assocs" do
+  test "get_field/3, fetch_field/2, get_assoc/3 with assocs" do
     profile_changeset = Changeset.change(%Profile{}, name: "michal")
     profile = Changeset.apply_changes(profile_changeset)
 
@@ -507,10 +542,14 @@ defmodule Ecto.Changeset.BelongsToTest do
       |> Changeset.put_assoc(:profile, profile_changeset)
     assert Changeset.get_field(changeset, :profile) == profile
     assert Changeset.fetch_field(changeset, :profile) == {:changes, profile}
+    assert Changeset.get_assoc(changeset, :profile, :changeset) == %{profile_changeset | action: :insert}
+    assert Changeset.get_assoc(changeset, :profile, :struct) == profile
 
     changeset = Changeset.change(%Author{profile: profile})
     assert Changeset.get_field(changeset, :profile) == profile
     assert Changeset.fetch_field(changeset, :profile) == {:data, profile}
+    assert Changeset.get_assoc(changeset, :profile, :changeset) == Changeset.change(profile)
+    assert Changeset.get_assoc(changeset, :profile, :struct) == profile
   end
 
   test "on_replace: :nilify" do

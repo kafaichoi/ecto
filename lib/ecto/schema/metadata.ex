@@ -37,13 +37,17 @@ defmodule Ecto.Schema.Metadata do
 
   @type state :: :built | :loaded | :deleted
 
-  @type t :: %__MODULE__{
-          context: any,
+  @type context :: any
+
+  @type t(schema) :: %__MODULE__{
+          context: context,
           prefix: Ecto.Schema.prefix(),
-          schema: module,
+          schema: schema,
           source: Ecto.Schema.source(),
           state: state
         }
+
+  @type t :: t(module)
 
   defimpl Inspect do
     import Inspect.Algebra

@@ -8,21 +8,34 @@ defmodule Ecto.Query.Builder.GroupByTest do
 
   describe "escape" do
     test "handles expressions and params" do
-      assert {Macro.escape(quote do [&0.y()] end), {[], :acc}} ==
-             escape(:group_by, quote do x.y() end, {[], :acc}, [x: 0], __ENV__)
+      assert {Macro.escape(quote do [&0.y()] end), {[], %{}}} ==
+             escape(:group_by, quote do x.y() end, {[], %{}}, [x: 0], __ENV__)
 
-      assert {Macro.escape(quote do [&0.x(), &1.y()] end), {[], :acc}} ==
-             escape(:group_by, quote do [x.x(), y.y()] end, {[], :acc}, [x: 0, y: 1], __ENV__)
+      assert {Macro.escape(quote do [&0.x(), &1.y()] end), {[], %{}}} ==
+             escape(:group_by, quote do [x.x(), y.y()] end, {[], %{}}, [x: 0, y: 1], __ENV__)
 
       import Kernel, except: [>: 2]
-      assert {Macro.escape(quote do [1 > 2] end), {[], :acc}} ==
-             escape(:group_by, quote do 1 > 2 end, {[], :acc}, [], __ENV__)
+      assert {Macro.escape(quote do [1 > 2] end), {[], %{}}} ==
+             escape(:group_by, quote do 1 > 2 end, {[], %{}}, [], __ENV__)
     end
 
     test "raises on unbound variables" do
       message = ~r"unbound variable `x` in query"
       assert_raise Ecto.Query.CompileError, message, fn ->
-        escape(:group_by, quote do x.y end, {[], :acc}, [], __ENV__)
+        escape(:group_by, quote do x.y end, {[], %{}}, [], __ENV__)
+      end
+    end
+
+    test "can reference the alias of a selected value with selected_as/1" do
+      query = from p in "posts", select: selected_as(p.id, :ident), group_by: selected_as(:ident)
+      assert [{:selected_as, [], [:ident]}]  = hd(query.group_bys).expr
+    end
+
+    test "raises if name given to selected_as/1 is not an atom" do
+      message = "expected literal atom or interpolated value in selected_as/1, got: `\"ident\"`"
+
+      assert_raise Ecto.Query.CompileError, message, fn ->
+        escape(:group_by, quote do selected_as("ident") end, {[], %{}}, [], __ENV__)
       end
     end
   end
@@ -51,6 +64,17 @@ defmodule Ecto.Query.Builder.GroupByTest do
       assert_raise ArgumentError, message, fn ->
         temp = "temp"
         group_by("posts", [p], ^temp)
+      end
+    end
+
+    test "supports interpolated atom names in selected_as/1" do
+      query = from p in "posts", select: selected_as(p.id, :ident), group_by: selected_as(^:ident)
+      assert [{:selected_as, [], [:ident]}] = hd(query.group_bys).expr
+
+      message = "expected atom in selected_as/1, got: `\"ident\"`"
+
+      assert_raise Ecto.Query.CompileError, message, fn ->
+        from p in "posts", select: selected_as(p.id, :ident), group_by: selected_as(^"ident")
       end
     end
   end

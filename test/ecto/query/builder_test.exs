@@ -1,3 +1,5 @@
+Code.require_file "../../../integration_test/support/types.exs", __DIR__
+
 defmodule Ecto.Query.BuilderTest do
   use ExUnit.Case, async: true
 
@@ -5,7 +7,7 @@ defmodule Ecto.Query.BuilderTest do
   doctest Ecto.Query.Builder
 
   defp escape(quoted, vars, env) do
-    {escaped, {params, :acc}} = escape(quoted, :any, {[], :acc}, vars, env)
+    {escaped, {params, _acc}} = escape(quoted, :any, {[], %{}}, vars, env)
     {escaped, params}
   end
 
@@ -20,7 +22,7 @@ defmodule Ecto.Query.BuilderTest do
     assert {Macro.escape(quote do &0.y() > &1.z() end), []} ==
            escape(quote do x.y() > y.z() end, [x: 0, y: 1], __ENV__)
 
-    import Kernel, except: [+: 2]
+    import Kernel, except: [+: 2, +: 1]
     assert {Macro.escape(quote do &0.y() + &1.z() end), []} ==
            escape(quote do x.y() + y.z() end, [x: 0, y: 1], __ENV__)
 
@@ -31,13 +33,72 @@ defmodule Ecto.Query.BuilderTest do
            escape(quote do ~s"123" end, [], __ENV__)
 
     assert {{:%, [], [Ecto.Query.Tagged, {:%{}, [], [value: {:<<>>, [], [0, 1, 2]}, type: :binary]}]}, []} ==
-           escape(quote do <<0,1,2>> end, [], __ENV__)
+           escape(quote do <<0, 1, 2>> end, [], __ENV__)
+
+    assert {:some_atom, []} ==
+           escape(quote do :some_atom end, [], __ENV__)
 
     assert quote(do: &0.z()) ==
            escape(quote do field(x, :z) end, [x: 0], __ENV__)
            |> elem(0)
            |> Code.eval_quoted([], __ENV__)
            |> elem(0)
+
+    assert {Macro.escape(quote do -&0.y() end), []} ==
+           escape(quote do -x.y() end, [x: 0], __ENV__)
+  end
+
+  test "escape json_extract_path" do
+    expected = {Macro.escape(quote do: json_extract_path(&0.y(), ["a", "b"])), []}
+    actual = escape(quote do json_extract_path(x.y, ["a", "b"]) end, [x: 0], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(&0.y(), ["a", "b"])), []}
+    actual = escape(quote do json_extract_path(field(x, :y), ["a", "b"]) end, [x: 0], __ENV__)
+    assert actual == expected
+
+    actual = escape(quote do x.y["a"]["b"] end, [x: 0], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(as(:x).y(), ["a", "b"])), []}
+    actual = escape(quote do json_extract_path(as(:x).y, ["a", "b"]) end, [], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(parent_as(:x).y(), ["a", "b"])), []}
+    actual = escape(quote do json_extract_path(parent_as(:x).y, ["a", "b"]) end, [], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(as(:x).y(), ["a", "b"])), []}
+    actual = escape(quote do as(:x).y["a"]["b"] end, [], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(parent_as(:x).y(), ["a", "b"])), []}
+    actual = escape(quote do parent_as(:x).y["a"]["b"] end, [], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(&0.y(), ["a", 0])), []}
+    actual = escape(quote do x.y["a"][0] end, [x: 0], __ENV__)
+    assert actual == expected
+
+    expected = {Macro.escape(quote do: json_extract_path(&0.y(), [0, "a"])), []}
+    actual = escape(quote do x.y[0]["a"] end, [x: 0], __ENV__)
+    assert actual == expected
+
+    assert_raise Ecto.Query.CompileError, "`x` is not a valid json field", fn ->
+      escape(quote do json_extract_path(x, ["a"]) end, [x: 0], __ENV__)
+    end
+
+    assert_raise Ecto.Query.CompileError, "`x[\"a\"]` is not a valid query expression", fn ->
+      escape(quote do x["a"] end, [x: 0], __ENV__)
+    end
+
+    assert_raise Ecto.Query.CompileError, ~r/expected JSON path to contain literal strings.*got: `a`/, fn ->
+      escape(quote do x.y[a] end, [x: 0], __ENV__)
+    end
+
+    assert_raise Ecto.Query.CompileError, "expected JSON path to be a literal list or interpolated value, got: `bad`", fn ->
+      escape(quote do json_extract_path(x.y, bad) end, [x: 0], __ENV__)
+    end
   end
 
   test "escape fragments" do
@@ -68,17 +129,29 @@ defmodule Ecto.Query.BuilderTest do
                  fn -> escape(quote do fragment("", 1) end, [], __ENV__) end
   end
 
+  defmacro my_first_value(expr) do
+    quote do
+      nth_value(unquote(expr), 1)
+    end
+  end
+
   test "escape over with window name" do
+    assert {Macro.escape(quote(do: over(count(&0.id()), :w))), []}  ==
+           escape(quote(do: count(x.id()) |> over(:w)), [x: 0], __ENV__)
+
     assert {Macro.escape(quote(do: over(nth_value(&0.id(), 1), :w))), []}  ==
            escape(quote(do: nth_value(x.id(), 1) |> over(:w)), [x: 0], __ENV__)
 
-    assert {Macro.escape(quote(do: over(count(&0.id()), :w))), []}  ==
-           escape(quote(do: count(x.id()) |> over(:w)), [x: 0], __ENV__)
+    assert {Macro.escape(quote(do: over(nth_value(&0.id(), 1), :w))), []}  ==
+           escape(quote(do: my_first_value(x.id()) |> over(:w)), [x: 0], __ENV__)
   end
 
   test "escape over with window parts" do
     assert {Macro.escape(quote(do: over(row_number(), []))), []}  ==
            escape(quote(do: over(row_number())), [], __ENV__)
+
+    assert {Macro.escape(quote(do: over(nth_value(&0.id(), 1), []))), []}  ==
+           escape(quote(do: over(my_first_value(x.id()))), [x: 0], __ENV__)
 
     assert {Macro.escape(quote(do: over(nth_value(&0.id(), 1), order_by: [asc: &0.id()]))), []} ==
            escape(quote(do: nth_value(x.id(), 1) |> over(order_by: x.id())), [x: 0], __ENV__)
@@ -94,10 +167,14 @@ defmodule Ecto.Query.BuilderTest do
                  fn ->
       escape(quote(do: nth_value(x.id(), 1) |> over(order_by: ^foo)), [x: 0], __ENV__)
     end
+
+    import Kernel, except: [is_nil: 1]
+    assert {Macro.escape(quote(do: over(filter(avg(&0.value()), is_nil(&0.flag())), []))), []}  ==
+      escape(quote(do: avg(x.value()) |> filter(is_nil(x.flag())) |> over([])), [x: 0], __ENV__)
   end
 
   test "escape type cast" do
-    import Kernel, except: [+: 2]
+    import Kernel, except: [+: 2, +: 1]
     assert {Macro.escape(quote do type(&0.y() + &1.z(), :decimal) end), []} ==
            escape(quote do type(x.y() + y.z(), :decimal) end, [x: 0, y: 1], __ENV__)
 
@@ -113,12 +190,21 @@ defmodule Ecto.Query.BuilderTest do
     assert {Macro.escape(quote do type(sum(&0.y()), :decimal) end), []} ==
           escape(quote do type(sum(x.y()), :decimal) end, [x: 0], {__ENV__, %{}})
 
+    assert {Macro.escape(quote do type(count(), :decimal) end), []} ==
+          escape(quote do type(count(), :decimal) end, [x: 0], {__ENV__, %{}})
+
     import Kernel, except: [>: 2]
     assert {Macro.escape(quote do type(filter(sum(&0.y()), &0.y() > &0.z()), :decimal) end), []} ==
           escape(quote do type(filter(sum(x.y()), x.y() > x.z()), :decimal) end, [x: 0], {__ENV__, %{}})
 
     assert {Macro.escape(quote do type(over(fragment({:raw, "array_agg("}, {:expr, &0.id()}, {:raw, ")"}), :y), {:array, :"Elixir.Ecto.UUID"}) end), []} ==
       escape(quote do type(over(fragment("array_agg(?)", x.id()), :y), {:array, Ecto.UUID}) end, [x: 0], {__ENV__, %{}})
+  end
+
+  test "escape parameterized types" do
+    parameterized_type = Ecto.ParameterizedType.init(ParameterizedPrefixedString, prefix: "p")
+    assert {Macro.escape(quote do type(&0.y(), unquote(parameterized_type)) end), []} ==
+          escape(quote do type(field(x, :y), unquote(parameterized_type)) end, [x: 0], __ENV__)
   end
 
   defmacro wrapped_sum(a) do
@@ -145,10 +231,6 @@ defmodule Ecto.Query.BuilderTest do
       escape(quote(do: "#{x}"), [], __ENV__)
     end
 
-    assert_raise Ecto.Query.CompileError, ~r"`:atom` is not a valid query expression", fn ->
-      escape(quote(do: :atom), [], __ENV__)
-    end
-
     assert_raise Ecto.Query.CompileError, ~r"short-circuit operators are not supported: `&&`", fn ->
       escape(quote(do: true && false), [], __ENV__)
     end
@@ -169,12 +251,12 @@ defmodule Ecto.Query.BuilderTest do
       escape(quote(do: x.y == 1), [], __ENV__)
     end
 
-    assert_raise Ecto.Query.CompileError, ~r"expected literal atom or interpolated value", fn ->
-      escape(quote(do: field(x, 123)), [x: 0], __ENV__) |> elem(0) |> Code.eval_quoted([], __ENV__)
+    assert_raise Ecto.Query.CompileError, ~r"expected literal atom or interpolated value.*got: `var`", fn ->
+      escape(quote(do: field(x, var)), [x: 0], __ENV__) |> elem(0) |> Code.eval_quoted([], __ENV__)
     end
 
     assert_raise Ecto.Query.CompileError,
-                 ~r"make sure that the module Foo is required and that bar/1 is a macro",
+                 ~r"make sure that you have required\n  the module or imported the relevant function",
                  fn ->
       escape(quote(do: Foo.bar(x)), [x: 0], __ENV__) |> elem(0) |> Code.eval_quoted([], __ENV__)
     end
@@ -194,7 +276,7 @@ defmodule Ecto.Query.BuilderTest do
   end
 
   defp params(quoted, type, vars \\ []) do
-    {_, {params, :acc}} = escape(quoted, type, {[], :acc}, vars, __ENV__)
+    {_, {params, _acc}} = escape(quoted, type, {[], %{}}, vars, __ENV__)
     params
   end
 
@@ -226,6 +308,8 @@ defmodule Ecto.Query.BuilderTest do
     assert quoted_type("foo", []) == :string
     assert quoted_type(true, []) == :boolean
     assert quoted_type(false, []) == :boolean
+    assert quoted_type(nil, []) == :any
+    assert quoted_type(:some_atom, []) == :atom
 
     assert quoted_type([1, 2, 3], []) == {:array, :integer}
     assert quoted_type([1, 2.0, 3], []) == {:array, :any}
@@ -260,8 +344,9 @@ defmodule Ecto.Query.BuilderTest do
     assert validate_type!(quote do :string end, [], env) == :string
     assert validate_type!(quote do x.title end, [x: 0], env) == {0, :title}
     assert validate_type!(quote do field(x, :title) end, [x: 0], env) == {0, :title}
+    assert validate_type!(quote do field(x, ^:title) end, [x: 0], env) == {0, :title}
 
-    assert_raise Ecto.Query.CompileError, ~r"^type/2 expects an alias, atom or source.field as second argument, got: ", fn ->
+    assert_raise Ecto.Query.CompileError, ~r"^type/2 expects an alias, atom", fn ->
       validate_type!(quote do "string" end, [x: 0], env)
     end
   end

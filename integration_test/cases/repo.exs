@@ -1,5 +1,5 @@
 defmodule Ecto.Integration.RepoTest do
-  use Ecto.Integration.Case, async: Application.get_env(:ecto, :async_integration_tests, true)
+  use Ecto.Integration.Case, async: Application.compile_env(:ecto, :async_integration_tests, true)
 
   alias Ecto.Integration.TestRepo
   import Ecto.Query
@@ -15,12 +15,12 @@ defmodule Ecto.Integration.RepoTest do
   alias Ecto.Integration.PostUserCompositePk
 
   test "returns already started for started repos" do
-    assert {:error, {:already_started, _}} = TestRepo.start_link
+    assert {:error, {:already_started, _}} = TestRepo.start_link()
   end
 
   test "supports unnamed repos" do
     assert {:ok, pid} = TestRepo.start_link(name: nil)
-    assert Ecto.Repo.Queryable.all(pid, Post, []) == []
+    assert Ecto.Repo.Queryable.all(pid, Post, Ecto.Repo.Supervisor.tuplet(pid, [])) == []
   end
 
   test "all empty" do
@@ -90,11 +90,11 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "insert, update and delete" do
-    post = %Post{title: "insert, update, delete", text: "fetch empty"}
+    post = %Post{title: "insert, update, delete", visits: 1}
     meta = post.__meta__
 
     assert %Post{} = inserted = TestRepo.insert!(post)
-    assert %Post{} = updated = TestRepo.update!(Ecto.Changeset.change(inserted, text: "new"))
+    assert %Post{} = updated = TestRepo.update!(Ecto.Changeset.change(inserted, visits: 2))
 
     deleted_meta = put_in meta.state, :deleted
     assert %Post{__meta__: ^deleted_meta} = TestRepo.delete!(updated)
@@ -144,7 +144,7 @@ defmodule Ecto.Integration.RepoTest do
   @tag :composite_pk
   test "insert, update and delete with associated composite pk" do
     user = TestRepo.insert!(%User{})
-    post = TestRepo.insert!(%Post{title: "post title", text: "post text"})
+    post = TestRepo.insert!(%Post{title: "post title"})
 
     user_post = TestRepo.insert!(%PostUserCompositePk{user_id: user.id, post_id: post.id})
     assert TestRepo.get_by!(PostUserCompositePk, [user_id: user.id, post_id: post.id]) == user_post
@@ -159,23 +159,26 @@ defmodule Ecto.Integration.RepoTest do
     assert catch_error(TestRepo.insert(%Post{}, prefix: "oops"))
     assert catch_error(TestRepo.update(changeset, prefix: "oops"))
     assert catch_error(TestRepo.delete(changeset, prefix: "oops"))
+
+    # Check we can still insert the post after the invalid prefix attempt
+    assert %Post{id: _} = TestRepo.insert!(%Post{})
   end
 
   test "insert and update with changeset" do
     # On insert we merge the fields and changes
-    changeset = Ecto.Changeset.cast(%Post{text: "x", title: "wrong"},
+    changeset = Ecto.Changeset.cast(%Post{visits: 13, title: "wrong"},
                                     %{"title" => "hello", "temp" => "unknown"}, ~w(title temp)a)
 
     post = TestRepo.insert!(changeset)
-    assert %Post{text: "x", title: "hello", temp: "unknown"} = post
-    assert %Post{text: "x", title: "hello", temp: "temp"} = TestRepo.get!(Post, post.id)
+    assert %Post{visits: 13, title: "hello", temp: "unknown"} = post
+    assert %Post{visits: 13, title: "hello", temp: "temp"} = TestRepo.get!(Post, post.id)
 
     # On update we merge only fields, direct schema changes are discarded
-    changeset = Ecto.Changeset.cast(%{post | text: "y"},
+    changeset = Ecto.Changeset.cast(%{post | visits: 17},
                                     %{"title" => "world", "temp" => "unknown"}, ~w(title temp)a)
 
-    assert %Post{text: "y", title: "world", temp: "unknown"} = TestRepo.update!(changeset)
-    assert %Post{text: "x", title: "world", temp: "temp"} = TestRepo.get!(Post, post.id)
+    assert %Post{visits: 17, title: "world", temp: "unknown"} = TestRepo.update!(changeset)
+    assert %Post{visits: 13, title: "world", temp: "temp"} = TestRepo.get!(Post, post.id)
   end
 
   test "insert and update with empty changeset" do
@@ -266,15 +269,19 @@ defmodule Ecto.Integration.RepoTest do
 
   test "optimistic locking in update/delete operations" do
     import Ecto.Changeset, only: [cast: 3, optimistic_lock: 2]
-    base_post = TestRepo.insert!(%Comment{})
+    base_comment = TestRepo.insert!(%Comment{})
 
     changeset_ok =
-      base_post
+      base_comment
       |> cast(%{"text" => "foo.bar"}, ~w(text)a)
       |> optimistic_lock(:lock_version)
     TestRepo.update!(changeset_ok)
 
-    changeset_stale = optimistic_lock(base_post, :lock_version)
+    changeset_stale =
+      base_comment
+      |> cast(%{"text" => "foo.bat"}, ~w(text)a)
+      |> optimistic_lock(:lock_version)
+
     assert_raise Ecto.StaleEntryError, fn -> TestRepo.update!(changeset_stale) end
     assert_raise Ecto.StaleEntryError, fn -> TestRepo.delete!(changeset_stale) end
   end
@@ -282,7 +289,7 @@ defmodule Ecto.Integration.RepoTest do
   test "optimistic locking in update operation with nil field" do
     import Ecto.Changeset, only: [cast: 3, optimistic_lock: 3]
 
-    base_post =
+    base_comment =
       %Comment{}
       |> cast(%{lock_version: nil}, [:lock_version])
       |> TestRepo.insert!()
@@ -294,7 +301,7 @@ defmodule Ecto.Integration.RepoTest do
       end
 
     changeset_ok =
-      base_post
+      base_comment
       |> cast(%{"text" => "foo.bar"}, ~w(text)a)
       |> optimistic_lock(:lock_version, incrementer)
 
@@ -306,7 +313,7 @@ defmodule Ecto.Integration.RepoTest do
   test "optimistic locking in delete operation with nil field" do
     import Ecto.Changeset, only: [cast: 3, optimistic_lock: 3]
 
-    base_post =
+    base_comment =
       %Comment{}
       |> cast(%{lock_version: nil}, [:lock_version])
       |> TestRepo.insert!()
@@ -317,10 +324,10 @@ defmodule Ecto.Integration.RepoTest do
         old_value -> old_value + 1
       end
 
-    changeset_ok = optimistic_lock(base_post, :lock_version, incrementer)
+    changeset_ok = optimistic_lock(base_comment, :lock_version, incrementer)
     TestRepo.delete!(changeset_ok)
 
-    refute TestRepo.get(Comment, base_post.id)
+    refute TestRepo.get(Comment, base_comment.id)
   end
 
   @tag :unique_constraint
@@ -334,7 +341,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "posts_uuid_index (unique_constraint)"
+    assert exception.message =~ "\"posts_uuid_index\" (unique_constraint)"
     assert exception.message =~ "The changeset has not defined any constraint."
     assert exception.message =~ "call `unique_constraint/3`"
 
@@ -346,7 +353,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "posts_email_changeset (unique_constraint)"
+    assert exception.message =~ "\"posts_email_changeset\" (unique_constraint)"
 
     {:error, changeset} =
       changeset
@@ -472,7 +479,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "comments_post_id_fkey (foreign_key_constraint)"
+    assert exception.message =~ "\"comments_post_id_fkey\" (foreign_key_constraint)"
     assert exception.message =~ "The changeset has not defined any constraint."
     assert exception.message =~ "call `foreign_key_constraint/3`"
 
@@ -484,7 +491,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "comments_post_id_other (foreign_key_constraint)"
+    assert exception.message =~ "\"comments_post_id_other\" (foreign_key_constraint)"
 
     {:error, changeset} =
       changeset
@@ -503,7 +510,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "comments_post_id_fkey (foreign_key_constraint)"
+    assert exception.message =~ "\"comments_post_id_fkey\" (foreign_key_constraint)"
     assert exception.message =~ "The changeset has not defined any constraint."
 
     message = ~r/constraint error when attempting to insert struct/
@@ -514,7 +521,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.insert()
       end
 
-    assert exception.message =~ "comments_post_id_other (foreign_key_constraint)"
+    assert exception.message =~ "\"comments_post_id_other\" (foreign_key_constraint)"
 
     {:error, changeset} =
       changeset
@@ -533,7 +540,7 @@ defmodule Ecto.Integration.RepoTest do
         TestRepo.delete!(user)
       end
 
-    assert exception.message =~ "permalinks_user_id_fkey (foreign_key_constraint)"
+    assert exception.message =~ "\"permalinks_user_id_fkey\" (foreign_key_constraint)"
     assert exception.message =~ "The changeset has not defined any constraint."
   end
 
@@ -551,7 +558,7 @@ defmodule Ecto.Integration.RepoTest do
         |> TestRepo.delete()
       end
 
-    assert exception.message =~ "permalinks_user_id_pther (foreign_key_constraint)"
+    assert exception.message =~ "\"permalinks_user_id_pther\" (foreign_key_constraint)"
   end
 
   @tag :foreign_key_constraint
@@ -609,9 +616,9 @@ defmodule Ecto.Integration.RepoTest do
     |> Ecto.Changeset.assoc_constraint(:post)
   end
 
-  test "unsafe_validate_unique/3" do
-    {:ok, inserted_post} = TestRepo.insert(%Post{title: "Greetings", text: "hi"})
-    new_post_changeset = Post.changeset(%Post{}, %{title: "Greetings", text: "ho"})
+  test "unsafe_validate_unique/4" do
+    {:ok, inserted_post} = TestRepo.insert(%Post{title: "Greetings", visits: 13})
+    new_post_changeset = Post.changeset(%Post{}, %{title: "Greetings", visits: 17})
 
     changeset = Ecto.Changeset.unsafe_validate_unique(new_post_changeset, [:title], TestRepo)
     assert changeset.errors[:title] ==
@@ -620,12 +627,12 @@ defmodule Ecto.Integration.RepoTest do
     changeset = Ecto.Changeset.unsafe_validate_unique(new_post_changeset, [:title, :text], TestRepo)
     assert changeset.errors[:title] == nil
 
-    update_changeset = Post.changeset(inserted_post, %{text: "ho"})
+    update_changeset = Post.changeset(inserted_post, %{visits: 17})
     changeset = Ecto.Changeset.unsafe_validate_unique(update_changeset, [:title], TestRepo)
     assert changeset.errors[:title] == nil # cannot conflict with itself
   end
 
-  test "unsafe_validate_unique/3 with composite keys" do
+  test "unsafe_validate_unique/4 with composite keys" do
     {:ok, inserted_post} = TestRepo.insert(%CompositePk{a: 123, b: 456, name: "UniqueName"})
 
     different_pk = CompositePk.changeset(%CompositePk{}, %{name: "UniqueName", a: 789, b: 321})
@@ -645,8 +652,8 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "get(!)" do
-    post1 = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    post2 = TestRepo.insert!(%Post{title: "2", text: "hai"})
+    post1 = TestRepo.insert!(%Post{title: "1"})
+    post2 = TestRepo.insert!(%Post{title: "2"})
 
     assert post1 == TestRepo.get(Post, post1.id)
     assert post2 == TestRepo.get(Post, to_string post2.id) # With casting
@@ -656,7 +663,7 @@ defmodule Ecto.Integration.RepoTest do
 
     TestRepo.delete!(post1)
 
-    assert nil   == TestRepo.get(Post, post1.id)
+    assert TestRepo.get(Post, post1.id) == nil
     assert_raise Ecto.NoResultsError, fn ->
       TestRepo.get!(Post, post1.id)
     end
@@ -677,31 +684,76 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "get_by(!)" do
-    post1 = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    post2 = TestRepo.insert!(%Post{title: "2", text: "hello"})
+    post1 = TestRepo.insert!(%Post{title: "1", visits: 1})
+    post2 = TestRepo.insert!(%Post{title: "2", visits: 2})
 
     assert post1 == TestRepo.get_by(Post, id: post1.id)
-    assert post1 == TestRepo.get_by(Post, text: post1.text)
-    assert post1 == TestRepo.get_by(Post, id: post1.id, text: post1.text)
+    assert post1 == TestRepo.get_by(Post, title: post1.title)
+    assert post1 == TestRepo.get_by(Post, id: post1.id, title: post1.title)
     assert post2 == TestRepo.get_by(Post, id: to_string(post2.id)) # With casting
-    assert nil   == TestRepo.get_by(Post, text: "hey")
-    assert nil   == TestRepo.get_by(Post, id: post2.id, text: "hey")
+    assert nil   == TestRepo.get_by(Post, title: "hey")
+    assert nil   == TestRepo.get_by(Post, id: post2.id, visits: 3)
 
     assert post1 == TestRepo.get_by!(Post, id: post1.id)
-    assert post1 == TestRepo.get_by!(Post, text: post1.text)
-    assert post1 == TestRepo.get_by!(Post, id: post1.id, text: post1.text)
+    assert post1 == TestRepo.get_by!(Post, title: post1.title)
+    assert post1 == TestRepo.get_by!(Post, id: post1.id, visits: 1)
     assert post2 == TestRepo.get_by!(Post, id: to_string(post2.id)) # With casting
 
     assert post1 == TestRepo.get_by!(Post, %{id: post1.id})
 
     assert_raise Ecto.NoResultsError, fn ->
-      TestRepo.get_by!(Post, id: post2.id, text: "hey")
+      TestRepo.get_by!(Post, id: post2.id, title: "hey")
     end
   end
 
+  test "reload" do
+    post1 = TestRepo.insert!(%Post{title: "1", visits: 1})
+    post2 = TestRepo.insert!(%Post{title: "2", visits: 2})
+
+    assert post1 == TestRepo.reload(post1)
+    assert [post1, post2] == TestRepo.reload([post1, post2])
+    assert [post1, post2, nil] == TestRepo.reload([post1, post2, %Post{id: 0}])
+    assert nil == TestRepo.reload(%Post{id: 0})
+
+    # keeps order as received in the params
+    assert [post2, post1] == TestRepo.reload([post2, post1])
+
+    TestRepo.update_all(Post, inc: [visits: 1])
+
+    assert [%{visits: 2}, %{visits: 3}] = TestRepo.reload([post1, post2])
+  end
+
+  test "reload ignores preloads" do
+    post = TestRepo.insert!(%Post{title: "1", visits: 1}) |> TestRepo.preload(:comments)
+
+    assert %{comments: %Ecto.Association.NotLoaded{}} = TestRepo.reload(post)
+  end
+
+  test "reload!" do
+    post1 = TestRepo.insert!(%Post{title: "1", visits: 1})
+    post2 = TestRepo.insert!(%Post{title: "2", visits: 2})
+
+    assert post1 == TestRepo.reload!(post1)
+    assert [post1, post2] == TestRepo.reload!([post1, post2])
+
+    assert_raise RuntimeError, ~r"could not reload", fn ->
+      TestRepo.reload!([post1, post2, %Post{id: -1}])
+    end
+
+    assert_raise Ecto.NoResultsError, fn ->
+      TestRepo.reload!(%Post{id: -1})
+    end
+
+    assert [post2, post1] == TestRepo.reload([post2, post1])
+
+    TestRepo.update_all(Post, inc: [visits: 1])
+
+    assert [%{visits: 2}, %{visits: 3}] = TestRepo.reload!([post1, post2])
+  end
+
   test "first, last and one(!)" do
-    post1 = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    post2 = TestRepo.insert!(%Post{title: "2", text: "hai"})
+    post1 = TestRepo.insert!(%Post{title: "1"})
+    post2 = TestRepo.insert!(%Post{title: "2"})
 
     assert post1 == Post |> first |> TestRepo.one
     assert post2 == Post |> last |> TestRepo.one
@@ -722,8 +774,8 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "exists?" do
-    TestRepo.insert!(%Post{title: "1", text: "hai", visits: 2})
-    TestRepo.insert!(%Post{title: "2", text: "hai", visits: 1})
+    TestRepo.insert!(%Post{title: "1", visits: 2})
+    TestRepo.insert!(%Post{title: "2", visits: 1})
 
     query = from p in Post, where: not is_nil(p.title), limit: 2
     assert query |> TestRepo.exists? == true
@@ -754,7 +806,6 @@ defmodule Ecto.Integration.RepoTest do
     assert TestRepo.aggregate(Post, :min, :visits) == 10
     assert TestRepo.aggregate(Post, :count, :visits) == 4
     assert "50" = to_string(TestRepo.aggregate(Post, :sum, :visits))
-    assert "12.5" <> _ = to_string(TestRepo.aggregate(Post, :avg, :visits))
 
     # With order_by
     query = from Post, order_by: [asc: :visits]
@@ -763,8 +814,25 @@ defmodule Ecto.Integration.RepoTest do
     # With order_by and limit
     query = from Post, order_by: [asc: :visits], limit: 2
     assert TestRepo.aggregate(query, :max, :visits) == 12
+  end
 
-    # With distinct
+  @tag :decimal_precision
+  test "aggregate avg" do
+    TestRepo.insert!(%Post{visits: 10})
+    TestRepo.insert!(%Post{visits: 12})
+    TestRepo.insert!(%Post{visits: 14})
+    TestRepo.insert!(%Post{visits: 14})
+
+    assert "12.5" <> _ = to_string(TestRepo.aggregate(Post, :avg, :visits))
+  end
+
+  @tag :inline_order_by
+  test "aggregate with distinct" do
+    TestRepo.insert!(%Post{visits: 10})
+    TestRepo.insert!(%Post{visits: 12})
+    TestRepo.insert!(%Post{visits: 14})
+    TestRepo.insert!(%Post{visits: 14})
+
     query = from Post, order_by: [asc: :visits], distinct: true
     assert TestRepo.aggregate(query, :count, :visits) == 3
   end
@@ -786,7 +854,7 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   @tag :insert_select
-  test "insert all with query" do
+  test "insert all with query for single fields" do
     comment = TestRepo.insert!(%Comment{text: "1", lock_version: 1})
 
     text_query = from(c in Comment, select: c.text, where: [id: ^comment.id, lock_version: 1])
@@ -811,6 +879,88 @@ defmodule Ecto.Integration.RepoTest do
             %Comment{text: "1"},
             %Comment{text: "1", lock_version: 1},
             %Comment{text: "6", lock_version: 6}] = inserted_rows
+  end
+
+  describe "insert_all with source query" do
+    @tag :upsert_all
+    @tag :with_conflict_target
+    @tag :concat
+    test "insert_all with query and conflict target" do
+      {:ok, %Post{id: id}} = TestRepo.insert(%Post{
+        title: "A generic title"
+      })
+
+      source = from p in Post,
+        select: %{
+          title: fragment("concat(?, ?, ?)", p.title, type(^" suffix ", :string), p.id)
+        }
+
+      assert {1, _} = TestRepo.insert_all(Post, source, conflict_target: [:id], on_conflict: :replace_all)
+
+      expected_id = id + 1
+      expected_title = "A generic title suffix #{id}"
+
+      assert %Post{title: ^expected_title} = TestRepo.get(Post, expected_id)
+    end
+
+    @tag :returning
+    @tag :concat
+    test "insert_all with query and returning" do
+      {:ok, %Post{id: id}} = TestRepo.insert(%Post{
+        title: "A generic title"
+      })
+
+      source = from p in Post,
+        select: %{
+          title: fragment("concat(?, ?, ?)", p.title, type(^" suffix ", :string), p.id)
+        }
+
+      assert {1, returns} = TestRepo.insert_all(Post, source, returning: [:id, :title])
+
+      expected_id = id + 1
+      expected_title = "A generic title suffix #{id}"
+      assert [%Post{id: ^expected_id, title: ^expected_title}] = returns
+    end
+
+    @tag :upsert_all
+    @tag :without_conflict_target
+    @tag :concat
+    test "insert_all with query and on_conflict" do
+      {:ok, %Post{id: id}} = TestRepo.insert(%Post{
+        title: "A generic title"
+      })
+
+      source = from p in Post,
+        select: %{
+          title: fragment("concat(?, ?, ?)", p.title, type(^" suffix ", :string), p.id)
+        }
+
+      assert {1, _} = TestRepo.insert_all(Post, source, on_conflict: :replace_all)
+
+      expected_id = id + 1
+      expected_title = "A generic title suffix #{id}"
+
+      assert %Post{title: ^expected_title} = TestRepo.get(Post, expected_id)
+    end
+
+    @tag :concat
+    test "insert_all with query" do
+      {:ok, %Post{id: id}} = TestRepo.insert(%Post{
+        title: "A generic title"
+      })
+
+      source = from p in Post,
+        select: %{
+          title: fragment("concat(?, ?, ?)", p.title, type(^" suffix ", :string), p.id)
+        }
+
+      assert {1, _} = TestRepo.insert_all(Post, source)
+
+      expected_id = id + 1
+      expected_title = "A generic title suffix #{id}"
+
+      assert %Post{title: ^expected_title} = TestRepo.get(Post, expected_id)
+    end
   end
 
   @tag :invalid_prefix
@@ -885,22 +1035,102 @@ defmodule Ecto.Integration.RepoTest do
     assert custom.bid == bid2
   end
 
+  describe "placeholders" do
+    @describetag :placeholders
+
+    test "Repo.insert_all fills in placeholders" do
+      placeholders = %{foo: 100, bar: "test"}
+      bar_ph = {:placeholder, :bar}
+      foo_ph = {:placeholder, :foo}
+
+      entries = [
+        %{intensity: 1.0, title: bar_ph, posted: ~D[2020-12-21], visits: foo_ph},
+        %{intensity: 2.0, title: bar_ph, posted: ~D[2000-12-21], visits: foo_ph}
+      ] |> Enum.map(&Map.put(&1, :uuid, Ecto.UUID.generate))
+
+      TestRepo.insert_all(Post, entries, placeholders: placeholders)
+
+      query = from(p in Post, select: {p.intensity, p.title, p.visits})
+      assert [{1.0, "test", 100}, {2.0, "test", 100}] == TestRepo.all(query)
+    end
+
+    test "Repo.insert_all accepts non-atom placeholder keys" do
+      placeholders = %{10 => "integer key", {:foo, :bar} => "tuple key"}
+      entries = [%{text: {:placeholder, 10}}, %{text: {:placeholder, {:foo, :bar}}}]
+      TestRepo.insert_all(Comment, entries, placeholders: placeholders)
+
+      query = from(c in Comment, select: c.text)
+      assert ["integer key", "tuple key"] == TestRepo.all(query)
+    end
+
+    test "Repo.insert_all fills in placeholders with keyword list entries" do
+      TestRepo.insert_all(Barebone, [[num: {:placeholder, :foo}]], placeholders: %{foo: 100})
+
+      query = from(b in Barebone, select: b.num)
+      assert [100] == TestRepo.all(query)
+    end
+
+    @tag :upsert_all
+    @tag :with_conflict_target
+    test "Repo.insert_all upserts and fills in placeholders with conditioned on_conflict query" do
+      do_not_update_title = "don't touch me"
+
+      posted_value =
+        from p in Post, where: p.public == ^true and p.id > ^0, select: p.posted, limit: 1
+
+      on_conflict =
+        from p in Post, update: [set: [title: "updated"]], where: p.title != ^do_not_update_title
+
+      placeholders = %{visits: 1, title: "title"}
+
+      post1 = [
+        visits: {:placeholder, :visits},
+        title: {:placeholder, :title},
+        uuid: Ecto.UUID.generate(),
+        posted: posted_value
+      ]
+
+      post2 = [
+        title: do_not_update_title,
+        uuid: Ecto.UUID.generate(),
+        posted: posted_value
+      ]
+
+      assert TestRepo.insert_all(Post, [post1, post2],
+               placeholders: placeholders,
+               on_conflict: on_conflict,
+               conflict_target: [:uuid]
+             ) ==
+               {2, nil}
+
+      # only update first post
+      assert TestRepo.insert_all(Post, [post1, post2],
+               placeholders: placeholders,
+               on_conflict: on_conflict,
+               conflict_target: [:uuid]
+             ) ==
+               {1, nil}
+
+      assert TestRepo.aggregate(where(Post, title: "updated"), :count) == 1
+    end
+  end
+
   test "update all" do
-    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1"})
-    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2"})
-    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3"})
+    assert post1 = TestRepo.insert!(%Post{title: "1"})
+    assert post2 = TestRepo.insert!(%Post{title: "2"})
+    assert post3 = TestRepo.insert!(%Post{title: "3"})
 
     assert {3, nil} = TestRepo.update_all(Post, set: [title: "x"])
 
-    assert %Post{title: "x"} = TestRepo.get(Post, id1)
-    assert %Post{title: "x"} = TestRepo.get(Post, id2)
-    assert %Post{title: "x"} = TestRepo.get(Post, id3)
+    assert %Post{title: "x"} = TestRepo.reload(post1)
+    assert %Post{title: "x"} = TestRepo.reload(post2)
+    assert %Post{title: "x"} = TestRepo.reload(post3)
 
     assert {3, nil} = TestRepo.update_all("posts", [set: [title: nil]])
 
-    assert %Post{title: nil} = TestRepo.get(Post, id1)
-    assert %Post{title: nil} = TestRepo.get(Post, id2)
-    assert %Post{title: nil} = TestRepo.get(Post, id3)
+    assert %Post{title: nil} = TestRepo.reload(post1)
+    assert %Post{title: nil} = TestRepo.reload(post2)
+    assert %Post{title: nil} = TestRepo.reload(post3)
   end
 
   @tag :invalid_prefix
@@ -949,12 +1179,12 @@ defmodule Ecto.Integration.RepoTest do
     assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3"})
 
     query = from(p in Post, where: p.title == "1" or p.title == "2",
-                            update: [set: [text: ^"y"]])
+                            update: [set: [visits: ^17]])
     assert {2, nil} = TestRepo.update_all(query, set: [title: "x"])
 
-    assert %Post{title: "x", text: "y"} = TestRepo.get(Post, id1)
-    assert %Post{title: "x", text: "y"} = TestRepo.get(Post, id2)
-    assert %Post{title: "3", text: nil} = TestRepo.get(Post, id3)
+    assert %Post{title: "x", visits: 17} = TestRepo.get(Post, id1)
+    assert %Post{title: "x", visits: 17} = TestRepo.get(Post, id2)
+    assert %Post{title: "3", visits: nil} = TestRepo.get(Post, id3)
   end
 
   test "update all no entries" do
@@ -997,18 +1227,18 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "update all with casting and dumping" do
-    text = "hai"
+    visits = 13
     datetime = ~N[2014-01-16 20:26:51]
     assert %Post{id: id} = TestRepo.insert!(%Post{})
 
-    assert {1, nil} = TestRepo.update_all(Post, set: [text: text, inserted_at: datetime])
-    assert %Post{text: "hai", inserted_at: ^datetime} = TestRepo.get(Post, id)
+    assert {1, nil} = TestRepo.update_all(Post, set: [visits: visits, inserted_at: datetime])
+    assert %Post{visits: 13, inserted_at: ^datetime} = TestRepo.get(Post, id)
   end
 
   test "delete all" do
-    assert %Post{} = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    assert %Post{} = TestRepo.insert!(%Post{title: "2", text: "hai"})
-    assert %Post{} = TestRepo.insert!(%Post{title: "3", text: "hai"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "1"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "2"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "3"})
 
     assert {3, nil} = TestRepo.delete_all(Post)
     assert [] = TestRepo.all(Post)
@@ -1021,9 +1251,9 @@ defmodule Ecto.Integration.RepoTest do
 
   @tag :returning
   test "delete all with returning with schema" do
-    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2", text: "hai"})
-    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3", text: "hai"})
+    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1"})
+    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2"})
+    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3"})
 
     assert {3, posts} = TestRepo.delete_all(select(Post, [p], p))
 
@@ -1035,9 +1265,9 @@ defmodule Ecto.Integration.RepoTest do
 
   @tag :returning
   test "delete all with returning without schema" do
-    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2", text: "hai"})
-    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3", text: "hai"})
+    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1"})
+    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2"})
+    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3"})
 
     assert {3, posts} = TestRepo.delete_all(select("posts", [:id, :title]))
 
@@ -1048,9 +1278,9 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "delete all with filter" do
-    assert %Post{} = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    assert %Post{} = TestRepo.insert!(%Post{title: "2", text: "hai"})
-    assert %Post{} = TestRepo.insert!(%Post{title: "3", text: "hai"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "1"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "2"})
+    assert %Post{} = TestRepo.insert!(%Post{title: "3"})
 
     query = from(p in Post, where: p.title == "1" or p.title == "2")
     assert {2, nil} = TestRepo.delete_all(query)
@@ -1058,9 +1288,9 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "delete all no entries" do
-    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1", text: "hai"})
-    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2", text: "hai"})
-    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3", text: "hai"})
+    assert %Post{id: id1} = TestRepo.insert!(%Post{title: "1"})
+    assert %Post{id: id2} = TestRepo.insert!(%Post{title: "2"})
+    assert %Post{id: id3} = TestRepo.insert!(%Post{title: "3"})
 
     query = from(p in Post, where: p.title == "4")
     assert {0, nil} = TestRepo.delete_all(query)
@@ -1070,8 +1300,114 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "virtual field" do
-    assert %Post{id: id} = TestRepo.insert!(%Post{title: "1", text: "hai"})
+    assert %Post{id: id} = TestRepo.insert!(%Post{title: "1"})
     assert TestRepo.get(Post, id).temp == "temp"
+  end
+
+  describe "read only fields" do
+    test "select with read only field" do
+      {1, _} = TestRepo.insert_all("posts", [%{title: "1", read_only: "readonly"}])
+      query = from p in Post, where: p.read_only == ^"readonly", select: p.read_only
+
+      assert "readonly" == TestRepo.one(query)
+      assert %{read_only: "readonly"} = TestRepo.one(Post)
+    end
+
+    test "update with read only field" do
+      %Post{id: id} = post = TestRepo.insert!(%Post{title: "1"})
+      cs = Ecto.Changeset.change(post, %{title: "2", read_only: "nope"})
+      TestRepo.update!(cs)
+      assert is_nil(TestRepo.get(Post, id).read_only)
+    end
+
+    @tag :returning
+    test "update with read only field and returning" do
+      post = TestRepo.insert!(%Post{title: "1"})
+      cs = Ecto.Changeset.change(post, %{title: "2", read_only: "nope"})
+      updated_post = TestRepo.update!(cs, returning: true)
+      assert is_nil(updated_post.read_only)
+    end
+
+    test "update_all with read only field" do
+      TestRepo.insert!(%Post{title: "1"})
+      update_query = from p in Post, where: p.title == "1", update: [set: [read_only: "nope"]]
+
+      assert_raise Ecto.QueryError,  ~r/cannot update unwritable field `read_only` in query/, fn ->
+        TestRepo.update_all(update_query, [])
+      end
+    end
+
+    test "insert with read only field" do
+      %Post{id: id} = TestRepo.insert!(%Post{title: "1", read_only: "nope"})
+      assert is_nil(TestRepo.get(Post, id).read_only)
+    end
+
+    @tag :returning
+    test "insert with read only field and returning" do
+      post = TestRepo.insert!(%Post{title: "1", read_only: "nope"}, returning: true)
+      assert is_nil(post.read_only)
+    end
+
+    test "insert with read only field and conflict query" do
+      on_conflict = from Post, update: [set: [read_only: "nope"]]
+
+      assert_raise Ecto.QueryError,  ~r/cannot update unwritable field `read_only` in query/, fn ->
+        TestRepo.insert!(%Post{title: "1"}, on_conflict: on_conflict)
+      end
+
+      assert_raise Ecto.QueryError,  ~r/cannot update unwritable field `read_only` in query/, fn ->
+        TestRepo.insert!(%Post{title: "1"}, on_conflict: [set: [read_only: "nope"]])
+      end
+    end
+
+    test "insert with read only field and conflict replace" do
+      msg = "cannot replace unwritable field `:read_only` in :on_conflict option"
+
+      assert_raise ArgumentError,  msg, fn ->
+        TestRepo.insert!(%Post{title: "1"}, on_conflict: {:replace, [:read_only]})
+      end
+    end
+
+    @tag :with_conflict_target
+    @tag :upsert
+    test "insert with read only field and conflict replace_all" do
+      uuid = Ecto.UUID.generate()
+      TestRepo.insert!(%Post{uuid: uuid, title: "1"})
+      %Post{id: id} = TestRepo.insert!(%Post{uuid: uuid, title: "2"}, conflict_target: [:uuid], on_conflict: :replace_all)
+      assert %{title: "2", read_only: nil} = TestRepo.get(Post, id)
+    end
+
+    @tag :returning
+    @tag :with_conflict_target
+    @tag :upsert
+    test "insert with read only field and conflict replace_all and returning" do
+      uuid = Ecto.UUID.generate()
+      TestRepo.insert!(%Post{uuid: uuid, title: "1"})
+
+      post =
+        TestRepo.insert!(%Post{uuid: uuid, title: "2", read_only: "nope"},
+          conflict_target: [:uuid],
+          on_conflict: :replace_all,
+          returning: true
+        )
+
+      assert %{title: "2", read_only: nil} = post
+    end
+
+    test "insert_all with read only field" do
+      msg = ~r/Unwritable fields, such as virtual and read only fields are not supported./
+
+      assert_raise ArgumentError, msg, fn ->
+        TestRepo.insert_all(Post, [%{title: "1", read_only: "nope"}])
+      end
+
+      msg = "cannot select unwritable field `read_only` for insert_all"
+
+      assert_raise ArgumentError, msg, fn ->
+        query = from p in Post, select: %{read_only: p.read_only}
+        TestRepo.insert_all(Post, query)
+      end
+    end
   end
 
   ## Query syntax
@@ -1082,26 +1418,26 @@ defmodule Ecto.Integration.RepoTest do
 
   describe "query select" do
     test "expressions" do
-      %Post{} = TestRepo.insert!(%Post{title: "1", text: "hai"})
+      %Post{} = TestRepo.insert!(%Post{title: "1", visits: 13})
 
-      assert [{"1", "hai"}] ==
-             TestRepo.all(from p in Post, select: {p.title, p.text})
+      assert [{"1", 13}] ==
+             TestRepo.all(from p in Post, select: {p.title, p.visits})
 
-      assert [["1", "hai"]] ==
-             TestRepo.all(from p in Post, select: [p.title, p.text])
+      assert [["1", 13]] ==
+             TestRepo.all(from p in Post, select: [p.title, p.visits])
 
-      assert [%{:title => "1", 3 => "hai", "text" => "hai"}] ==
+      assert [%{:title => "1", 3 => 13, "visits" => 13}] ==
              TestRepo.all(from p in Post, select: %{
                :title => p.title,
-               "text" => p.text,
-               3 => p.text
+               "visits" => p.visits,
+               3 => p.visits
              })
 
-      assert [%{:title => "1", "1" => "hai", "text" => "hai"}] ==
+      assert [%{:title => "1", "1" => 13, "visits" => 13}] ==
              TestRepo.all(from p in Post, select: %{
                :title  => p.title,
-               p.title => p.text,
-               "text"  => p.text
+               p.title => p.visits,
+               "visits"  => p.visits
              })
 
       assert [%Foo{title: "1"}] ==
@@ -1109,12 +1445,12 @@ defmodule Ecto.Integration.RepoTest do
     end
 
     test "map update" do
-      %Post{} = TestRepo.insert!(%Post{title: "1", text: "hai"})
+      %Post{} = TestRepo.insert!(%Post{title: "1", visits: 13})
 
-      assert [%Post{:title => "new title", text: "hai"}] =
+      assert [%Post{:title => "new title", visits: 13}] =
              TestRepo.all(from p in Post, select: %{p | title: "new title"})
 
-      assert [%Post{title: "new title", text: "hai"}] =
+      assert [%Post{title: "new title", visits: 13}] =
         TestRepo.all(from p in Post, select: %Post{p | title: "new title"})
 
       assert_raise KeyError, fn ->
@@ -1128,6 +1464,17 @@ defmodule Ecto.Integration.RepoTest do
       assert_raise BadStructError, fn ->
         TestRepo.all(from p in Post, select: %Foo{p | title: p.title})
       end
+    end
+
+    test "map update on association" do
+      p = TestRepo.insert!(%Post{})
+      TestRepo.insert!(%Comment{post_id: p.id, text: "comment text"})
+      TestRepo.insert!(%Comment{})
+
+      query =
+        from(c in Comment, left_join: p in Post, on: c.post_id == p.id, select: %{p | temp: c.text})
+
+      assert [%Post{:temp => "comment text"}, nil] = TestRepo.all(query)
     end
 
     test "take with structs" do
@@ -1237,7 +1584,8 @@ defmodule Ecto.Integration.RepoTest do
     end
 
     test "merge" do
-      %Post{} = TestRepo.insert!(%Post{title: "1", counter: nil})
+      date = Date.utc_today()
+      %Post{id: post_id} = TestRepo.insert!(%Post{title: "1", counter: nil, posted: date, public: false})
 
       # Merge on source
       assert [%Post{title: "2"}] =
@@ -1256,6 +1604,35 @@ defmodule Ecto.Integration.RepoTest do
              Post |> select([p], merge(%{title: p.title}, %{title: "2"})) |> TestRepo.all()
       assert [%{title: "2"}] =
              Post |> select([p], %{title: p.title}) |> select_merge([p], %{title: "2"}) |> TestRepo.all()
+
+      # Merge on outer join with map
+      %Permalink{} = TestRepo.insert!(%Permalink{post_id: post_id, url: "Q", title: "Z"})
+
+      # left join record is present
+      assert [%{url: "Q", title: "1", posted: _date}] =
+               Permalink
+               |> join(:left, [l], p in Post, on: l.post_id == p.id)
+               |> select([l, p], merge(l, map(p, ^~w(title posted)a)))
+               |> TestRepo.all()
+
+      assert [%{url: "Q", title: "1", posted: _date}] =
+               Permalink
+               |> join(:left, [l], p in Post, on: l.post_id == p.id)
+               |> select_merge([_l, p], map(p, ^~w(title posted)a))
+               |> TestRepo.all()
+
+      # left join record is not present
+      assert [%{url: "Q", title: "Z", posted: nil}] =
+               Permalink
+               |> join(:left, [l], p in Post, on: l.post_id == p.id and p.public == true)
+               |> select([l, p], merge(l, map(p, ^~w(title posted)a)))
+               |> TestRepo.all()
+
+      assert [%{url: "Q", title: "Z", posted: nil}] =
+               Permalink
+               |> join(:left, [l], p in Post, on: l.post_id == p.id and p.public == true)
+               |> select_merge([_l, p], map(p, ^~w(title posted)a))
+               |> TestRepo.all()
     end
 
     test "merge with update on self" do
@@ -1277,8 +1654,114 @@ defmodule Ecto.Integration.RepoTest do
 
       assert [%Post{title: "1", counter: 2}] = TestRepo.all(subquery)
     end
+
+    @tag :selected_as_with_group_by
+    test "selected_as/2 with group_by" do
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 3})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 2})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-20], visits: nil})
+
+      query =
+        from p in Post,
+          select: %{
+            posted: selected_as(p.posted, :date),
+            min_visits: p.visits |> coalesce(0) |> min()
+          },
+          group_by: selected_as(:date),
+          order_by: p.posted
+
+      assert [%{posted: ~D[2020-12-20], min_visits: 0}, %{posted: ~D[2020-12-21], min_visits: 2}] =
+               TestRepo.all(query)
+    end
+
+    @tag :selected_as_with_order_by
+    test "selected_as/2 with order_by" do
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 3})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 2})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-20], visits: nil})
+
+      base_query =
+        from p in Post,
+          select: %{
+            posted: p.posted,
+            min_visits: p.visits |> coalesce(0) |> min() |> selected_as(:min_visits)
+          },
+          group_by: p.posted
+
+      # ascending order
+      results = base_query |> order_by(selected_as(:min_visits)) |> TestRepo.all()
+
+      assert [%{posted: ~D[2020-12-20], min_visits: 0}, %{posted: ~D[2020-12-21], min_visits: 2}] =
+               results
+
+      # descending order
+      results = base_query |> order_by([desc: selected_as(:min_visits)]) |> TestRepo.all()
+
+      assert [%{posted: ~D[2020-12-21], min_visits: 2}, %{posted: ~D[2020-12-20], min_visits: 0}] =
+               results
+    end
+
+    @tag :selected_as_with_order_by
+    test "selected_as/2 respects custom types" do
+      TestRepo.insert!(%Post{title: "title1", visits: 1})
+      TestRepo.insert!(%Post{title: "title2"})
+      uuid = Ecto.UUID.generate()
+
+      query =
+        from p in Post,
+          select: %{
+            uuid: type(^uuid, Ecto.UUID) |> selected_as(:uuid),
+            visits: p.visits |> coalesce(0) |> selected_as(:visits)
+          },
+          order_by: [selected_as(:uuid), selected_as(:visits)]
+
+      assert [%{uuid: ^uuid, visits: 0}, %{uuid: ^uuid, visits: 1}] = TestRepo.all(query)
+    end
+
+    @tag :selected_as_with_order_by_expression
+    test "selected_as/2 with order_by expression" do
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 3, intensity: 2.0})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-20], visits: nil, intensity: 10.0})
+
+      results =
+        from(p in Post,
+          select: %{
+            posted: p.posted,
+            visits: p.visits |> coalesce(0) |> selected_as(:num_visits),
+            intensity: selected_as(p.intensity, :strength)
+          },
+          order_by: [desc: (selected_as(:num_visits) + selected_as(:strength))]
+        )
+        |> TestRepo.all()
+
+      assert [%{posted: ~D[2020-12-20], visits: 0}, %{posted: ~D[2020-12-21], visits: 3}] =
+               results
+    end
+
+    @tag :selected_as_with_having
+    test "selected_as/2 with having" do
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 3})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-21], visits: 2})
+      TestRepo.insert!(%Post{posted: ~D[2020-12-20], visits: nil})
+
+      results =
+        from(p in Post,
+          select: %{
+            posted: p.posted,
+            min_visits: p.visits |> coalesce(0) |> min() |> selected_as(:min_visits)
+          },
+          group_by: p.posted,
+          having: selected_as(:min_visits) > 0,
+          or_having: not(selected_as(:min_visits) > 0),
+          order_by: p.posted
+        )
+        |> TestRepo.all()
+
+      assert [%{posted: ~D[2020-12-20], min_visits: 0}, %{posted: ~D[2020-12-21], min_visits: 2}] = results
+    end
   end
 
+  @tag :distinct_count
   test "query count distinct" do
     TestRepo.insert!(%Post{title: "1"})
     TestRepo.insert!(%Post{title: "1"})
@@ -1289,8 +1772,8 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "query where interpolation" do
-    post1 = TestRepo.insert!(%Post{text: "x", title: "hello"})
-    post2 = TestRepo.insert!(%Post{text: "y", title: "goodbye"})
+    post1 = TestRepo.insert!(%Post{title: "hello"})
+    post2 = TestRepo.insert!(%Post{title: "goodbye"})
 
     assert [post1, post2] == Post |> where([], []) |> TestRepo.all |> Enum.sort_by(& &1.id)
     assert [post1]        == Post |> where([], [title: "hello"]) |> TestRepo.all
@@ -1303,7 +1786,7 @@ defmodule Ecto.Integration.RepoTest do
     assert [post1]         == (from Post, where: ^params1) |> TestRepo.all
     assert [post1]         == (from Post, where: ^params2) |> TestRepo.all
 
-    post3 = TestRepo.insert!(%Post{text: "y", title: "goodbye", uuid: nil})
+    post3 = TestRepo.insert!(%Post{title: "goodbye", uuid: nil})
     params3 = [title: "goodbye", uuid: post3.uuid]
     assert [post3] == (from Post, where: ^params3) |> TestRepo.all
   end
@@ -1401,20 +1884,6 @@ defmodule Ecto.Integration.RepoTest do
       assert c4.uuid != c1.uuid
     end
 
-    @tag :with_conflict_target
-    @tag :with_conflict_target_on_constraint
-    test "on conflict keyword list and conflict target on constraint" do
-      on_conflict = [set: [title: "new"]]
-      post = %Post{title: "old"}
-      {:ok, inserted} = TestRepo.insert(post, on_conflict: on_conflict, conflict_target: {:constraint, :posts_pkey})
-      assert inserted.id
-
-      {:ok, updated} = TestRepo.insert(%{post | id: inserted.id}, on_conflict: on_conflict, conflict_target: {:constraint, :posts_pkey})
-      assert updated.id == inserted.id
-      assert updated.title != "new"
-      assert TestRepo.get!(Post, inserted.id).title == "new"
-    end
-
     @tag :returning
     @tag :with_conflict_target
     test "on conflict keyword list and conflict target and returning and field source" do
@@ -1495,35 +1964,35 @@ defmodule Ecto.Integration.RepoTest do
 
     @tag :without_conflict_target
     test "on conflict replace_all" do
-      post = %Post{title: "first", text: "text", uuid: Ecto.UUID.generate()}
+      post = %Post{title: "first", visits: 13, uuid: Ecto.UUID.generate()}
       {:ok, inserted} = TestRepo.insert(post, on_conflict: :replace_all)
       assert inserted.id
 
-      post = %Post{title: "updated", text: "updated", uuid: post.uuid}
+      post = %Post{title: "updated", visits: 17, uuid: post.uuid}
       post = TestRepo.insert!(post, on_conflict: :replace_all)
       assert post.id != inserted.id
       assert post.title == "updated"
-      assert post.text == "updated"
+      assert post.visits == 17
 
-      assert TestRepo.all(from p in Post, select: {p.id, p.title, p.text}) ==
-             [{post.id, "updated", "updated"}]
+      assert TestRepo.all(from p in Post, select: {p.id, p.title, p.visits}) ==
+             [{post.id, "updated", 17}]
       assert TestRepo.all(from p in Post, select: count(p.id)) == [1]
     end
 
     @tag :with_conflict_target
     test "on conflict replace_all and conflict target" do
-      post = %Post{title: "first", text: "text", uuid: Ecto.UUID.generate()}
+      post = %Post{title: "first", visits: 13, uuid: Ecto.UUID.generate()}
       {:ok, inserted} = TestRepo.insert(post, on_conflict: :replace_all, conflict_target: :uuid)
       assert inserted.id
 
-      post = %Post{title: "updated", text: "updated", uuid: post.uuid}
+      post = %Post{title: "updated", visits: 17, uuid: post.uuid}
       post = TestRepo.insert!(post, on_conflict: :replace_all, conflict_target: :uuid)
       assert post.id != inserted.id
       assert post.title == "updated"
-      assert post.text == "updated"
+      assert post.visits == 17
 
-      assert TestRepo.all(from p in Post, select: {p.id, p.title, p.text}) ==
-             [{post.id, "updated", "updated"}]
+      assert TestRepo.all(from p in Post, select: {p.id, p.title, p.visits}) ==
+             [{post.id, "updated", 17}]
       assert TestRepo.all(from p in Post, select: count(p.id)) == [1]
     end
   end
@@ -1594,8 +2063,26 @@ defmodule Ecto.Integration.RepoTest do
 
     @tag :with_conflict_target
     test "on conflict query and conflict target" do
-      on_conflict = from Post, update: [set: [title: "second"]]
+      on_conflict = from p in Post, where: p.id > ^0, update: [set: [title: "second"]]
       post = [title: "first", uuid: Ecto.UUID.generate()]
+      assert TestRepo.insert_all(Post, [post], on_conflict: on_conflict, conflict_target: [:uuid]) ==
+             {1, nil}
+
+      # Error on non-conflict target
+      assert catch_error(TestRepo.insert_all(Post, [post], on_conflict: on_conflict, conflict_target: [:id]))
+
+      # Error on conflict target
+      assert TestRepo.insert_all(Post, [post], on_conflict: on_conflict, conflict_target: [:uuid]) ==
+             {1, nil}
+      assert TestRepo.all(from p in Post, select: p.title) == ["second"]
+    end
+
+    @tag :insert_select
+    @tag :with_conflict_target
+    test "on conflict query and insert select and conflict target" do
+      on_conflict = from p in Post, where: p.id > ^0, update: [set: [title: "second"]]
+      visits_value = from p in Post, where: p.public == ^true and p.id > ^0, select: p.visits, limit: 1
+      post = [title: "first", uuid: Ecto.UUID.generate(), visits: visits_value]
       assert TestRepo.insert_all(Post, [post], on_conflict: on_conflict, conflict_target: [:uuid]) ==
              {1, nil}
 
@@ -1627,7 +2114,7 @@ defmodule Ecto.Integration.RepoTest do
     end
 
     @tag :with_conflict_target
-    test "source (without an ecto schema) on conflict query and conflict target" do
+    test "source (without an Ecto schema) on conflict query and conflict target" do
       on_conflict = [set: [title: "second"]]
       {:ok, uuid} = Ecto.UUID.dump(Ecto.UUID.generate())
       post = [title: "first", uuid: uuid]
@@ -1657,20 +2144,20 @@ defmodule Ecto.Integration.RepoTest do
 
       # Multiple record change value: note IDS are also replaced
       changes = [%{id: post_first.id + 2, title: "first_updated",
-                   text: "first_updated", uuid: post_first.uuid},
+                   visits: 1, uuid: post_first.uuid},
                  %{id: post_second.id + 2, title: "second_updated",
-                   text: "second_updated", uuid: post_second.uuid}]
+                   visits: 2, uuid: post_second.uuid}]
 
       TestRepo.insert_all(Post, changes, on_conflict: :replace_all)
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       updated_first = TestRepo.get(Post, post_first.id + 2)
       assert updated_first.title == "first_updated"
-      assert updated_first.text == "first_updated"
+      assert updated_first.visits == 1
 
       updated_second = TestRepo.get(Post, post_second.id + 2)
       assert updated_second.title == "second_updated"
-      assert updated_second.text == "second_updated"
+      assert updated_second.visits == 2
     end
 
     @tag :with_conflict_target
@@ -1687,20 +2174,20 @@ defmodule Ecto.Integration.RepoTest do
 
       # Multiple record change value: note IDS are also replaced
       changes = [%{id: post_second.id + 1, title: "first_updated",
-                   text: "first_updated", uuid: post_first.uuid},
+                   visits: 1, uuid: post_first.uuid},
                  %{id: post_second.id + 2, title: "second_updated",
-                   text: "second_updated", uuid: post_second.uuid}]
+                   visits: 2, uuid: post_second.uuid}]
 
       TestRepo.insert_all(Post, changes, on_conflict: :replace_all, conflict_target: :uuid)
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       updated_first = TestRepo.get(Post, post_second.id + 1)
       assert updated_first.title == "first_updated"
-      assert updated_first.text == "first_updated"
+      assert updated_first.visits == 1
 
       updated_second = TestRepo.get(Post, post_second.id + 2)
       assert updated_second.title == "second_updated"
-      assert updated_second.text == "second_updated"
+      assert updated_second.visits == 2
     end
 
     @tag :without_conflict_target
@@ -1717,20 +2204,20 @@ defmodule Ecto.Integration.RepoTest do
 
       # Multiple record change value: note IDS are not replaced
       changes = [%{id: post_first.id + 2, title: "first_updated",
-                   text: "first_updated", uuid: post_first.uuid},
+                   visits: 1, uuid: post_first.uuid},
                  %{id: post_second.id + 2, title: "second_updated",
-                   text: "second_updated", uuid: post_second.uuid}]
+                   visits: 2, uuid: post_second.uuid}]
 
       TestRepo.insert_all(Post, changes, on_conflict: {:replace_all_except, [:id]})
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       updated_first = TestRepo.get(Post, post_first.id)
       assert updated_first.title == "first_updated"
-      assert updated_first.text == "first_updated"
+      assert updated_first.visits == 1
 
       updated_second = TestRepo.get(Post, post_second.id)
       assert updated_second.title == "second_updated"
-      assert updated_second.text == "second_updated"
+      assert updated_second.visits == 2
     end
 
     @tag :with_conflict_target
@@ -1747,20 +2234,20 @@ defmodule Ecto.Integration.RepoTest do
 
       # Multiple record change value: note IDS are not replaced
       changes = [%{id: post_first.id + 2, title: "first_updated",
-                   text: "first_updated", uuid: post_first.uuid},
+                   visits: 1, uuid: post_first.uuid},
                  %{id: post_second.id + 2, title: "second_updated",
-                   text: "second_updated", uuid: post_second.uuid}]
+                   visits: 2, uuid: post_second.uuid}]
 
       TestRepo.insert_all(Post, changes, on_conflict: {:replace_all_except, [:id]}, conflict_target: :uuid)
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       updated_first = TestRepo.get(Post, post_first.id)
       assert updated_first.title == "first_updated"
-      assert updated_first.text == "first_updated"
+      assert updated_first.visits == 1
 
       updated_second = TestRepo.get(Post, post_second.id)
       assert updated_second.title == "second_updated"
-      assert updated_second.text == "second_updated"
+      assert updated_second.visits == 2
     end
 
     @tag :with_conflict_target
@@ -1776,23 +2263,97 @@ defmodule Ecto.Integration.RepoTest do
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       # Multiple record change value: note `public` field is not changed
-      changes = [%{id: post_first.id, title: "first_updated", visits: 11, public: false, text: "first_updated", uuid: post_first.uuid},
-                 %{id: post_second.id, title: "second_updated", visits: 21, public: true, text: "second_updated", uuid: post_second.uuid}]
+      changes = [%{id: post_first.id, title: "first_updated", visits: 11, public: false, uuid: post_first.uuid},
+                 %{id: post_second.id, title: "second_updated", visits: 21, public: true, uuid: post_second.uuid}]
 
-      TestRepo.insert_all(Post, changes, on_conflict: {:replace, [:title, :visits, :text]}, conflict_target: :uuid)
+      TestRepo.insert_all(Post, changes, on_conflict: {:replace, [:title, :visits]}, conflict_target: :uuid)
       assert TestRepo.all(from p in Post, select: count(p.id)) == [2]
 
       updated_first = TestRepo.get(Post, post_first.id)
       assert updated_first.title == "first_updated"
       assert updated_first.visits == 11
       assert updated_first.public == true
-      assert updated_first.text == "first_updated"
 
       updated_second = TestRepo.get(Post, post_second.id)
       assert updated_second.title == "second_updated"
       assert updated_second.visits == 21
       assert updated_second.public == false
-      assert updated_second.text == "second_updated"
     end
+  end
+
+  describe "values list" do
+    @describetag :values_list
+
+    test "all" do
+      uuid_module = uuid_module(TestRepo.__adapter__())
+      uuid = uuid_module.generate()
+
+      # Without select
+      values = [%{bid: uuid, visits: 1}, %{bid: uuid, visits: 2}]
+      types = %{bid: uuid_module, visits: :integer}
+      query = from v in values(values, types)
+      assert TestRepo.all(query) == values
+
+      # With select
+      query = select(query, [v], {v, v.bid})
+      assert TestRepo.all(query) == Enum.map(values, &{&1, &1.bid})
+    end
+
+    test "all with join" do
+      uuid_module = uuid_module(TestRepo.__adapter__())
+      uuid = uuid_module.generate()
+
+      values1 = [%{bid: uuid, visits: 1}, %{bid: uuid, visits: 2}]
+      values2 = [%{bid: uuid, visits: 1}]
+      types = %{bid: uuid_module, visits: :integer}
+
+      query =
+        from v1 in values(values1, types),
+          join: v2 in values(values2, types),
+          on: v1.visits == v2.visits
+
+      assert TestRepo.all(query) == [%{bid: uuid, visits: 1}]
+    end
+
+    test "delete_all" do
+      uuid_module = uuid_module(TestRepo.__adapter__())
+      uuid = uuid_module.generate()
+
+      _p1 = TestRepo.insert!(%Post{bid: uuid, visits: 1})
+      p2 = TestRepo.insert!(%Post{bid: uuid, visits: 5})
+
+      values = [%{bid: uuid, visits: 1}, %{bid: nil, visits: 1}, %{bid: uuid, visits: 3}]
+      types = %{bid: uuid_module, visits: :integer}
+
+      query =
+        from p in Post,
+          join: v in values(values, types),
+          on: p.visits == v.visits
+
+      assert {1, _} = TestRepo.delete_all(query)
+      assert TestRepo.all(Post) == [p2]
+    end
+
+    test "update_all" do
+      uuid_module = uuid_module(TestRepo.__adapter__())
+      uuid = uuid_module.generate()
+
+      TestRepo.insert!(%Post{bid: uuid, visits: 1})
+
+      values = [%{bid: uuid, visits: 10}, %{bid: nil, visits: 2}]
+      types = %{bid: uuid_module, visits: :integer}
+
+      query =
+        from p in Post,
+          join: v in values(values, types),
+          on: p.bid == v.bid,
+          update: [set: [visits: v.visits]]
+
+      assert {1, _} = TestRepo.update_all(query, [])
+      assert [%{visits: 10}] = TestRepo.all(Post)
+    end
+
+    defp uuid_module(Ecto.Adapters.Tds), do: Tds.Ecto.UUID
+    defp uuid_module(_), do: Ecto.UUID
   end
 end

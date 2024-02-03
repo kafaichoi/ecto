@@ -12,11 +12,12 @@ defmodule Ecto.Query.Builder.Windows do
 
   ## Examples
 
-      iex> escape(quote do [order_by: [desc: 13]] end, {[], :acc}, [x: 0], __ENV__)
-      {[order_by: [desc: 13]], [], {[], :acc}}
+      iex> escape(quote do [order_by: [desc: 13]] end, {[], %{}}, [x: 0], __ENV__)
+      {[order_by: [desc: 13]], [], {[], %{}}}
 
   """
-  @spec escape([Macro.t], {list, term}, Keyword.t, Macro.Env.t | {Macro.Env.t, fun}) :: {Macro.t, {list, term}}
+  @spec escape([Macro.t], {list, term}, Keyword.t, Macro.Env.t | {Macro.Env.t, fun})
+          :: {Macro.t, [{atom, term}], {list, term}}
   def escape(kw, params_acc, vars, env) when is_list(kw) do
     {compile, runtime} = sort(@sort_order, kw, :compile, [], [])
     {compile, params_acc} = Enum.map_reduce(compile, params_acc, &escape_compile(&1, &2, vars, env))
@@ -124,7 +125,7 @@ defmodule Ecto.Query.Builder.Windows do
   end
 
   defp escape_window(vars, {name, expr}, env) do
-    {compile_acc, runtime_acc, {params, _}} = escape(expr, {[], :acc}, vars, env)
+    {compile_acc, runtime_acc, {params, _acc}} = escape(expr, {[], %{}}, vars, env)
     {name, compile_acc, runtime_acc, Builder.escape_params(params)}
   end
 
@@ -171,7 +172,7 @@ defmodule Ecto.Query.Builder.Windows do
   defp do_runtime_window!([{:frame, frame} | kw], query, acc, params) do
     case frame do
       %Ecto.Query.DynamicExpr{} ->
-        {frame, params, _count} = Builder.Dynamic.partially_expand(query, frame, params, length(params))
+        {frame, params, _count} = Builder.Dynamic.partially_expand(:windows, query, frame, params, length(params))
         do_runtime_window!(kw, query, [{:frame, frame} | acc], params)
 
       _ ->

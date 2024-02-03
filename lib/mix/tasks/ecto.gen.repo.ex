@@ -6,6 +6,14 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
   @shortdoc "Generates a new repository"
 
+  @switches [
+    repo: [:string, :keep],
+  ]
+
+  @aliases [
+    r: :repo,
+  ]
+
   @moduledoc """
   Generates a new repository.
 
@@ -13,7 +21,7 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
   ## Examples
 
-      mix ecto.gen.repo -r Custom.Repo
+      $ mix ecto.gen.repo -r Custom.Repo
 
   This generator will automatically open the config/config.exs
   after generation if you have `ECTO_EDITOR` set in your environment
@@ -25,14 +33,15 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
   """
 
-  @doc false
+  @impl true
   def run(args) do
     no_umbrella!("ecto.gen.repo")
+    {opts, _} = OptionParser.parse!(args, strict: @switches, aliases: @aliases)
 
     repo =
-      case parse_repo(args) do
+      case Keyword.get_values(opts, :repo) do
         [] -> Mix.raise "ecto.gen.repo expects the repository to be given as -r MyApp.Repo"
-        [repo] -> repo
+        [repo] -> Module.concat([repo])
         [_ | _] -> Mix.raise "ecto.gen.repo expects a single repository to be given"
       end
 
@@ -53,22 +62,25 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
         check = String.contains?(contents, "import Config")
         config_first_line = get_first_config_line(check) <> "\n"
         new_contents = config_first_line <> "\n" <> config_template(opts)
-        Mix.shell().info [:green, "* updating ", :reset, "config/config.exs"]
-        File.write! "config/config.exs", String.replace(contents, config_first_line, new_contents)
+        Mix.shell().info [:green, "* updating ", :reset, config_path]
+        File.write! config_path, String.replace(contents, config_first_line, new_contents)
+
       {:error, _} ->
-        config_first_line = Config |> Code.ensure_loaded?() |> get_first_config_line()
-        create_file "config/config.exs", config_first_line <> "\n\n" <> config_template(opts)
+        create_file config_path, "import Config\n\n" <> config_template(opts)
     end
 
-    open?("config/config.exs")
+    open?(config_path, 3)
 
     Mix.shell().info """
     Don't forget to add your new repo to your supervision tree
     (typically in lib/#{app}/application.ex):
 
-        {#{inspect repo}, []}
+        def start(_type, _args) do
+          children = [
+            #{inspect repo},
+          ]
 
-    And to add it to the list of ecto repositories in your
+    And to add it to the list of Ecto repositories in your
     configuration files (so Ecto tasks work as expected):
 
         config #{inspect app},

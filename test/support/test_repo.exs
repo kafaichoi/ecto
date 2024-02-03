@@ -20,16 +20,28 @@ defmodule Ecto.TestAdapter do
     {:ok, Supervisor.child_spec({Task, fn -> :timer.sleep(:infinity) end}, []), %{meta: :meta}}
   end
 
-  def checkout(_mod, _opts, fun) do
+  def checkout(mod, _opts, fun) do
     send self(), {:checkout, fun}
-    fun.()
+    Process.put({mod, :checked_out?}, true)
+
+    try do
+      fun.()
+    after
+      Process.delete({mod, :checked_out?})
+    end
+  end
+
+  def checked_out?(mod) do
+    Process.get({mod, :checked_out?}) || false
   end
 
   ## Types
 
+  def loaders({:map, _}, type),  do: [&Ecto.Type.embedded_load(type, &1, :json)]
   def loaders(:binary_id, type), do: [Ecto.UUID, type]
   def loaders(_primitive, type), do: [type]
 
+  def dumpers({:map, _}, type),  do: [&Ecto.Type.embedded_dump(type, &1, :json)]
   def dumpers(:binary_id, type), do: [type, Ecto.UUID]
   def dumpers(_primitive, type), do: [type]
 
@@ -69,14 +81,23 @@ defmodule Ecto.TestAdapter do
 
   ## Schema
 
-  def insert_all(_, meta, header, rows, on_conflict, returning, _opts) do
-    meta = Map.merge(meta, %{header: header, on_conflict: on_conflict, returning: returning})
-    send(self(), {:insert_all, meta, rows})
+  def insert_all(_, meta, header, rows, on_conflict, returning, placeholders, opts) do
+    meta =
+      Map.merge(meta, %{
+        header: header,
+        on_conflict: on_conflict,
+        returning: returning,
+        placeholders: placeholders,
+        prefix: opts[:prefix]
+      })
+
+    sorted = if is_list(rows), do: Enum.map(rows, &Enum.sort/1), else: rows
+    send(self(), {:insert_all, meta, sorted})
     {1, nil}
   end
 
-  def insert(_, %{context: nil} = meta, fields, on_conflict, returning, _opts) do
-    meta = Map.merge(meta, %{fields: fields, on_conflict: on_conflict, returning: returning})
+  def insert(_, %{context: nil, prefix: prefix} = meta, fields, on_conflict, returning, _opts) do
+    meta = Map.merge(meta, %{fields: fields, on_conflict: on_conflict, returning: returning, prefix: prefix})
     send(self(), {:insert, meta})
     {:ok, Enum.zip(returning, 1..length(returning))}
   end
@@ -96,13 +117,13 @@ defmodule Ecto.TestAdapter do
     context
   end
 
-  def delete(_, %{context: nil} = meta, filters, _opts) do
-    meta = Map.merge(meta, %{filters: filters})
+  def delete(_, %{context: nil} = meta, filters, returning, _opts) do
+    meta = Map.merge(meta, %{filters: filters, returning: returning})
     send(self(), {:delete, meta})
-    {:ok, []}
+    {:ok, Enum.zip(returning, 1..length(returning))}
   end
 
-  def delete(_, %{context: context}, _filters, _opts) do
+  def delete(_, %{context: context}, _filters, _returning, _opts) do
     context
   end
 

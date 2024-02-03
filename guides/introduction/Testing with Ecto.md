@@ -2,12 +2,13 @@
 
 After you have successfully set up your database connection with Ecto for your application,
 its usage for your tests requires further changes, especially if you want to leverage the
-Ecto SQL Sandbox that allows you to run tests that talk to the database concurrently.
+[Ecto SQL Sandbox](https://hexdocs.pm/ecto_sql/Ecto.Adapters.SQL.Sandbox.html) that allows
+you to run tests that talk to the database concurrently.
 
 Create the `config/test.exs` file or append the following content:
 
 ```elixir
-use Mix.Config
+import Config
 
 config :my_app, MyApp.Repo,
   username: "postgres",
@@ -20,6 +21,12 @@ config :my_app, MyApp.Repo,
 
 Thereby, we configure the database connection for our test setup.
 In this case, we use a Postgres database and set it up to use the sandbox pool that will wrap each test in a transaction.
+
+Make sure we import the configuration for the test environment at the very bottom of `config/config.exs`:
+
+```elixir
+import_config "#{config_env()}.exs"
+```
 
 We also need to add an explicit statement to the end of `test/test_helper.exs` about the `sandbox` mode:
 
@@ -47,18 +54,15 @@ defmodule MyApp.RepoCase do
   end
 
   setup tags do
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(MyApp.Repo)
-
-    unless tags[:async] do
-      Ecto.Adapters.SQL.Sandbox.mode(MyApp.Repo, {:shared, self()})
-    end
-
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(MyApp.Repo, shared: not tags[:async])
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
     :ok
   end
 end
 ```
 
-The case template above brings `Ecto` and `Ecto.Query` functions into your tests and checkouts a database connection. It also enables a shared sandbox connection mode in case the test is not running asynchronously. See `Ecto.Adapters.SQL.Sandbox` for more information.
+The case template above brings `Ecto` and `Ecto.Query` functions into your tests and checks-out a database connection. It also enables a shared sandbox connection mode in case the test is not running asynchronously.
+See [`Ecto.Adapters.SQL.Sandbox`](https://hexdocs.pm/ecto_sql/Ecto.Adapters.SQL.Sandbox.html) for more information.
 
 To add `test/support/` folder for compilation in test environment we need to update `mix.exs` configuration
 

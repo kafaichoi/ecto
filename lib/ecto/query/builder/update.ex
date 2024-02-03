@@ -67,7 +67,7 @@ defmodule Ecto.Query.Builder.Update do
         {compile, [{k, v} | runtime], params}
       {k, v}, {compile, runtime, params} ->
         k = escape_field!(k)
-        {v, {params, :acc}} = Builder.escape(v, type_for_key(op, {0, k}), {params, :acc}, vars, env)
+        {v, {params, _acc}} = Builder.escape(v, type_for_key(op, {0, k}), {params, %{}}, vars, env)
         {[{k, v} | compile], runtime, params}
       _, _acc ->
         Builder.error! "malformed #{inspect op} in update `#{Macro.to_string(kw)}`, " <>
@@ -172,7 +172,7 @@ defmodule Ecto.Query.Builder.Update do
   defp runtime_field!(query, key, kw, acc) do
     Enum.map_reduce kw, acc, fn
       {k, %Ecto.Query.DynamicExpr{} = v}, {params, count} when is_atom(k) ->
-        {v, params, count} = Ecto.Query.Builder.Dynamic.partially_expand(query, v, params, count)
+        {v, params, count} = Ecto.Query.Builder.Dynamic.partially_expand(:update, query, v, params, count)
         {{k, v}, {params, count}}
       {k, v}, {params, count} when is_atom(k) ->
         params = [{v, type_for_key(key, {0, k})} | params]

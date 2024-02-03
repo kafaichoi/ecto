@@ -6,9 +6,9 @@ In this guide, we will talk about polymorphic associations and how `many_to_many
 
 ## Todo lists v65131
 
-The web has seen its share of todo list applications. But that won't stop us from creating our own!
+The internet has seen its share of todo list applications. But that won't stop us from creating our own!
 
-In our case, there is one aspect of todo list applications we are interested in, which is the relationship where the todo list has many todo items. We have explored this exact scenario in detail in an article we posted on Plataformatec's blog about [nested associations and embeds](http://blog.plataformatec.com.br/2015/08/working-with-ecto-associations-and-embeds/). Let's recap the important points.
+In our case, there is one aspect of todo list applications we are interested in, which is the relationship where the todo list has many todo items. This exact scenario is explored in detail in a post about [nested associations and embeds](https://dashbit.co/blog/working-with-ecto-associations-and-embeds) from Dashbit's blog. Let's recap the important points.
 
 Our todo list app has two schemas, `Todo.List` and `Todo.Item`:
 
@@ -51,7 +51,7 @@ When such a form is submitted in Phoenix, it will send parameters with the follo
 ```elixir
 %{
   "todo_list" => %{
-    "title" => "shipping list",
+    "title" => "shopping list",
     "todo_items" => %{
       0 => %{"description" => "bread"},
       1 => %{"description" => "eggs"}
@@ -83,7 +83,7 @@ By calling `Ecto.Changeset.cast_assoc/3`, Ecto will look for a "todo_items" key 
   * if a todo item sent as parameter does not have an ID (nor a matching ID), we consider that todo item should be inserted
   * if a todo item is currently associated but its ID was not sent as parameter, we consider the todo item is being replaced and we act according to the `:on_replace` callback. By default `:on_replace` will raise so you choose a behaviour between replacing, deleting, ignoring or nilifying the association
 
-The advantage of using `cast_assoc/3` is that Ecto is able to do all of the hard work of keeping the entries associated, **as long as we pass the data exactly in the format that Ecto expects**. However, such approach is not always preferrable and in many situations it is better to design our associations differently or decouple our UIs from our database representation.
+The advantage of using `cast_assoc/3` is that Ecto is able to do all of the hard work of keeping the entries associated, **as long as we pass the data exactly in the format that Ecto expects**. However, such approach is not always preferable and in many situations it is better to design our associations differently or decouple our UIs from our database representation.
 
 ## Polymorphic todo items
 
@@ -95,7 +95,7 @@ The issue with the design above is that it breaks database references. The datab
 
 The design above is also extremely inefficient, especially if you're working with large tables. Bear in mind that if that's your case, you might be forced to remove such polymorphic references in the future when frequent polymorphic queries start grinding the database to a halt even after adding indexes and optimizing the database.
 
-Luckily, the documentation for the `Ecto.Schema.belongs_to/3` macro includes a section named "Polymorphic associations" with some examples on how to design sane and performant associations. One of those approaches consists in using many join tables. Besides the "todo_lists" and "projects" tables and the "todo_items" table, we would create "todo_list_items" and "project_items" to associate todo items to todo lists and todo items to projects respectively. In terms of migrations, we are looking at the following:
+Luckily, the documentation for the `Ecto.Schema.belongs_to/3` macro includes a section named "Polymorphic associations" with some examples on how to design sane and performant associations. One of those approaches consists in using several join tables. Besides the "todo_lists" and "projects" tables and the "todo_items" table, we would create "todo_list_items" and "project_items" to associate todo items to todo lists and todo items to projects respectively. In terms of migrations, we are looking at the following:
 
 ```elixir
 create table(:todo_lists)  do
@@ -113,13 +113,13 @@ create table(:todo_items)  do
   timestamps()
 end
 
-create table(:todo_lists_items) do
+create table(:todo_list_items) do
   add :todo_item_id, references(:todo_items)
   add :todo_list_id, references(:todo_lists)
   timestamps()
 end
 
-create table(:projects_items) do
+create table(:project_items) do
   add :todo_item_id, references(:todo_items)
   add :project_id, references(:projects)
   timestamps()
@@ -128,7 +128,7 @@ end
 
 By adding one table per association pair, we keep database references and can efficiently perform queries that relies on indexes.
 
-First let's see how implement this functionality in Ecto using a `has_many :through` and then use `many_to_many` to remove a lot of the boilerplate we were forced to introduce.
+First let's see how to implement this functionality in Ecto using a `has_many :through` and then use `many_to_many` to remove a lot of the boilerplate we were forced to introduce.
 
 ## Polymorphism with has_many :through
 
@@ -253,7 +253,7 @@ end
 
 Notice `MyApp.TodoList` no longer needs to define a `has_many` association pointing to the `MyApp.TodoListItem` schema and instead we can just associate to `:todo_items` using `many_to_many`.
 
-Differently from `has_many :through`, `many_to_many` associations are also writeable. This means we can send data through our forms exactly as we did at the beginning of this guide:
+Differently from `has_many :through`, `many_to_many` associations are also writable. This means we can send data through our forms exactly as we did at the beginning of this guide:
 
 ```elixir
 %{"todo_list" => %{
@@ -383,7 +383,7 @@ end
 
 # Primary key and timestamps are not required if
 # using many_to_many without schemas
-create table("todo_lists_items", primary_key: false) do
+create table("todo_list_items", primary_key: false) do
   add :todo_item_id, references(:todo_items)
   add :todo_list_id, references(:todo_lists)
   # timestamps()
@@ -391,7 +391,7 @@ end
 
 # Primary key and timestamps are not required if
 # using many_to_many without schemas
-create table("projects_items", primary_key: false) do
+create table("project_items", primary_key: false) do
   add :todo_item_id, references(:todo_items)
   add :project_id, references(:projects)
   # timestamps()
@@ -400,4 +400,4 @@ end
 
 Overall our code looks structurally the same as `has_many` would, although at the database level our relationships are expressed with join tables.
 
-While in this guide we changed our code to cope with the parameter format required by `cast_assoc`, in [Constraints and Upserts](constraints-and-upserts.html) we drop `cast_assoc` altogether and use `put_assoc` which brings more flexibilities when working with associations.
+While in this guide we changed our code to cope with the parameter format required by `cast_assoc`, in [Constraints and Upserts](Constraints and Upserts.md) we drop `cast_assoc` altogether and use `put_assoc` which brings more flexibilities when working with associations.

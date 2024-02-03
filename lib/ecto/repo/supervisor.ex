@@ -3,13 +3,14 @@ defmodule Ecto.Repo.Supervisor do
   use Supervisor
 
   @defaults [timeout: 15000, pool_size: 10]
-  @integer_url_query_params ["timeout", "pool_size"]
+  @integer_url_query_params ["timeout", "pool_size", "idle_interval"]
 
   @doc """
   Starts the repo supervisor.
   """
   def start_link(repo, otp_app, adapter, opts) do
-    sup_opts = if name = Keyword.get(opts, :name, repo), do: [name: name], else: []
+    name = Keyword.get(opts, :name, repo)
+    sup_opts = if name, do: [name: name], else: []
     Supervisor.start_link(__MODULE__, {name, repo, otp_app, adapter, opts}, sup_opts)
   end
 
@@ -23,7 +24,6 @@ defmodule Ecto.Repo.Supervisor do
 
     case repo_init(type, repo, config) do
       {:ok, config} ->
-        validate_config!(repo, config)
         {url, config} = Keyword.pop(config, :url)
         {:ok, Keyword.merge(config, parse_url(url || ""))}
 
@@ -43,15 +43,6 @@ defmodule Ecto.Repo.Supervisor do
       repo.init(type, config)
     else
       {:ok, config}
-    end
-  end
-
-  defp validate_config!(repo, config) do
-    log = Keyword.get(config, :log, :debug)
-
-    unless log in [false, :debug, :info, :warn, :error] do
-      raise ArgumentError, "invalid :log configuration for #{inspect(repo)}, it should be " <>
-                             "false, :debug, :info, :warn or :error, got: #{inspect(log)}"
     end
   end
 
@@ -108,17 +99,28 @@ defmodule Ecto.Repo.Supervisor do
     destructure [username, password], info.userinfo && String.split(info.userinfo, ":")
     "/" <> database = info.path
 
-    url_opts = [username: username,
-                password: password,
-                database: database,
-                hostname: info.host,
-                port:     info.port]
+    url_opts = [
+      scheme: info.scheme,
+      username: username,
+      password: password,
+      database: database,
+      port: info.port
+    ]
 
+    url_opts = put_hostname_if_present(url_opts, info.host)
     query_opts = parse_uri_query(info)
 
     for {k, v} <- url_opts ++ query_opts,
         not is_nil(v),
         do: {k, if(is_binary(v), do: URI.decode(v), else: v)}
+  end
+
+  defp put_hostname_if_present(keyword, "") do
+    keyword
+  end
+
+  defp put_hostname_if_present(keyword, hostname) when is_binary(hostname) do
+    Keyword.put(keyword, :hostname, hostname)
   end
 
   defp parse_uri_query(%URI{query: nil}),
@@ -153,16 +155,37 @@ defmodule Ecto.Repo.Supervisor do
     end
   end
 
+  @doc false
+  def tuplet(name, opts) do
+    adapter_meta = Ecto.Repo.Registry.lookup(name)
+
+    if opts[:stacktrace] || Map.get(adapter_meta, :stacktrace) do
+      {:current_stacktrace, stacktrace} = :erlang.process_info(self(), :current_stacktrace)
+      {adapter_meta, Keyword.put(opts, :stacktrace, stacktrace)}
+    else
+      {adapter_meta, opts}
+    end
+  end
+
   ## Callbacks
 
   @doc false
   def init({name, repo, otp_app, adapter, opts}) do
+    # Normalize name to atom, ignore via/global names
+    name = if is_atom(name), do: name, else: nil
+
     case runtime_config(:supervisor, repo, otp_app, opts) do
       {:ok, opts} ->
+        :telemetry.execute(
+          [:ecto, :repo, :init],
+          %{system_time: System.system_time()},
+          %{repo: repo, opts: opts}
+        )
+
         {:ok, child, meta} = adapter.init([repo: repo] ++ opts)
         cache = Ecto.Query.Planner.new_query_cache(name)
         meta = Map.merge(meta, %{repo: repo, cache: cache})
-        child_spec = wrap_child_spec(child, [adapter, meta])
+        child_spec = wrap_child_spec(child, [name, adapter, meta])
         Supervisor.init([child_spec], strategy: :one_for_one, max_restarts: 0)
 
       :ignore ->
@@ -170,11 +193,11 @@ defmodule Ecto.Repo.Supervisor do
     end
   end
 
-  def start_child({mod, fun, args}, adapter, meta) do
+  def start_child({mod, fun, args}, name, adapter, meta) do
     case apply(mod, fun, args) do
       {:ok, pid} ->
-        meta = Map.put(meta, :pid, pid)
-        Ecto.Repo.Registry.associate(self(), {adapter, meta})
+        meta = Map.merge(meta, %{pid: pid, adapter: adapter})
+        Ecto.Repo.Registry.associate(self(), name, meta)
         {:ok, pid}
 
       other ->

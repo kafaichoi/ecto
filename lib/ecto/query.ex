@@ -2,9 +2,15 @@ defmodule Ecto.SubQuery do
   @moduledoc """
   A struct representing subqueries.
 
+  Users of Ecto must consider this struct as opaque
+  and not access its field. Authors of adapters may
+  read its contents, but never modify them.
+
   See `Ecto.Query.subquery/2` for more information.
   """
   defstruct [:query, :params, :select, :cache]
+
+  @type t :: %__MODULE__{}
 end
 
 defmodule Ecto.Query do
@@ -30,7 +36,8 @@ defmodule Ecto.Query do
       Repo.all(query)
 
   In the example above, we are directly querying the "users" table
-  from the database.
+  from the database. Queries do not reach out to the data store until
+  they are passed as arguments to a function from `Ecto.Repo`.
 
   ## Query expressions
 
@@ -49,6 +56,7 @@ defmodule Ecto.Query do
     * Booleans: `true`, `false`
     * Binaries: `<<1, 2, 3>>`
     * Strings: `"foo bar"`, `~s(this is a string)`
+    * Atoms (other than booleans and `nil`): `:foo`, `:bar`
     * Arrays: `[1, 2, 3]`, `~w(interpolate words)`
 
   All other types and dynamic values must be passed as a parameter using
@@ -124,9 +132,9 @@ defmodule Ecto.Query do
 
   Composing queries uses the same syntax as creating a query.
   The difference is that, instead of passing a schema like `User`
-  on the right side of `in`, we passed the query itself.
+  on the right-hand side of `in`, we passed the query itself.
 
-  Any value can be used on the right-side of `in` as long as it implements
+  Any value can be used on the right-hand side of `in` as long as it implements
   the `Ecto.Queryable` protocol. For now, we know the protocol is
   implemented for both atoms (like `User`) and strings (like "users").
 
@@ -135,14 +143,14 @@ defmodule Ecto.Query do
 
   ### Positional bindings
 
-  On the left side of `in` we specify the query bindings.  This is
-  done inside from and join clauses.  In the query below `u` is a
+  On the left-hand side of `in` we specify the query bindings. This is
+  done inside `from` and `join` clauses. In the query below `u` is a
   binding and `u.age` is a field access using this binding.
 
       query = from u in User, where: u.age > 18
 
-  Bindings are not exposed from the query.  When composing queries, you
-  must specify bindings again for each refinement query.  For example,
+  Bindings are not exposed from the query. When composing queries, you
+  must specify bindings again for each refinement query. For example,
   to further narrow down the above query, we again need to tell Ecto what
   bindings to expect:
 
@@ -177,11 +185,11 @@ defmodule Ecto.Query do
 
   The example above will work if the input query has 1 or 10
   bindings. As long as the number of bindings is less than the
-  number of from + joins, Ecto will match only what you have
+  number of `from`s + `join`s, Ecto will match only what you have
   specified. The first binding always matches the source given
   in `from`.
 
-  Similarly, if you are interested only on the last binding
+  Similarly, if you are interested only in the last binding
   (or the last bindings) in a query, you can use `...` to
   specify "all bindings before" and match on the last one.
 
@@ -197,33 +205,55 @@ defmodule Ecto.Query do
 
       from [p, ..., c] in posts_with_comments, select: {p.title, c.body}
 
-  In other words, `...` will include all the binding between the
-  first and the last, which may be no binding at all, one or many.
+  In other words, `...` will include all the bindings between the
+  first and the last, which may be one, many or no bindings at all.
 
   ### Named bindings
 
-  Another option for flexibly building queries with joins are
-  named bindings. Coming back to the previous example, provided
-  we bind a join to a concrete name:
+  Another option for flexibly building queries with joins are named
+  bindings. Coming back to the previous example, we can use the
+  `as: :comment` option to bind the comments join to a concrete name:
 
       posts_with_comments =
-        from p in query,
+        from p in Post,
           join: c in Comment, as: :comment, on: c.post_id == p.id
 
-  We can refer to it by that name using a following form of
-  bindings list:
+  Now we can refer to it using the following form of a bindings list:
 
       from [p, comment: c] in posts_with_comments, select: {p.title, c.body}
 
   This approach lets us not worry about keeping track of the position
-  of the bindings when composing the query.
-
-  What's more, a name can be assigned to the first binding as well:
+  of the bindings when composing the query. The `:as` option can be
+  given both on joins and on `from`:
 
       from p in Post, as: :post
 
   Only atoms are accepted for binding names. Named binding references
-  are expected to be placed in the tail position of the bindings list.
+  must always be placed at the end of the bindings list:
+
+      [positional_binding_1, positional_binding_2, named_1: binding, named_2: binding]
+
+  Named bindings can also be used for late binding with the `as/1`
+  construct, allowing you to refer to a binding that has not been
+  defined yet:
+
+      from c in Comment, where: as(:posts).id == c.post_id
+
+  This is especially useful when working with subqueries, where you
+  may need to refer to a parent binding with `parent_as`, which is
+  not known when writing the subquery:
+
+      child_query = from c in Comment, where: parent_as(:posts).id == c.post_id
+      from p in Post, as: :posts, inner_lateral_join: c in subquery(child_query)
+
+  You can also match on a specific binding when building queries. For
+  example, let's suppose you want to create a generic sort function
+  that will order by a given `field` with a given `as` in `query`:
+
+      # Knowing the name of the binding
+      def sort(query, as, field) do
+        from [{^as, x}] in query, order_by: field(x, ^field)
+      end
 
   ### Bindingless operations
 
@@ -294,24 +324,26 @@ defmodule Ecto.Query do
   The keyword-based and pipe-based examples are equivalent. The downside
   of using macros is that the binding must be specified for every operation.
   However, since keyword-based and pipe-based examples are equivalent, the
-  bindingless syntax also works for macros:
+  bindingless syntax also works for macros. Please note that the following
+  example is not completely equivalent to the previous example,
+  as it does not return the name but rather the `User` struct:
 
       "users"
       |> where([u], u.age > 18)
       |> select([:name])
 
-  Such allows developers to write queries using bindings only in more
+  Such a syntax allows developers to write queries using bindings only in more
   complex query expressions.
 
   This module documents each of those macros, providing examples in
   both the keywords query and pipe expression formats.
 
-  ## Query Prefix
+  ## Query prefix
 
   It is possible to set a prefix for the queries. For Postgres users,
   this will specify the schema where the table is located, while for
   MySQL users this will specify the database where the table is
-  located.  When no prefix is set, Postgres queries are assumed to be
+  located. When no prefix is set, Postgres queries are assumed to be
   in the public schema, while MySQL queries are assumed to be in the
   database set in the config for the repo.
 
@@ -330,8 +362,7 @@ defmodule Ecto.Query do
 
       results =
         query # May be User or an Ecto.Query itself
-        |> Ecto.Queryable.to_query
-        |> Map.put(:prefix, "accounts")
+        |> Ecto.Query.put_query_prefix("accounts")
         |> Repo.all()
 
   Setting the prefix in the query changes the default prefix of all `from`
@@ -349,19 +380,45 @@ defmodule Ecto.Query do
     1. The `:prefix` option given to `from`/`join` has the highest precedence
     2. Then it falls back to the `@schema_prefix` attribute declared in the schema
       given to `from`/`join`
-    3. Then it falls back to the query prefix
+    3. Then it falls back to the query prefix. The query prefix may be
+       set either on the query with `put_query_prefix/2` or by passing
+       the `:prefix` option when calling the `Repo` module (where the
+       former wins if both methods are used)
 
   The prefixes set in the query will be preserved when loading data.
   """
 
-  defstruct [prefix: nil, sources: nil, from: nil, joins: [], aliases: %{}, wheres: [], select: nil,
-             order_bys: [], limit: nil, offset: nil, group_bys: [], combinations: [], updates: [],
-             havings: [], preloads: [], assocs: [], distinct: nil, lock: nil, windows: [],
-             with_ctes: nil]
+  @doc """
+  The `Ecto.Query` struct.
+
+  Users of Ecto must consider this struct as opaque
+  and not access its field directly. Authors of adapters
+  may read its contents, but never modify them.
+  """
+  defstruct prefix: nil,
+            sources: nil,
+            from: nil,
+            joins: [],
+            aliases: %{},
+            wheres: [],
+            select: nil,
+            order_bys: [],
+            limit: nil,
+            offset: nil,
+            group_bys: [],
+            combinations: [],
+            updates: [],
+            havings: [],
+            preloads: [],
+            assocs: [],
+            distinct: nil,
+            lock: nil,
+            windows: [],
+            with_ctes: nil
 
   defmodule FromExpr do
     @moduledoc false
-    defstruct [:source, :as, :prefix, hints: []]
+    defstruct [:source, :file, :line, :as, :prefix, params: [], hints: []]
   end
 
   defmodule DynamicExpr do
@@ -376,22 +433,39 @@ defmodule Ecto.Query do
 
   defmodule BooleanExpr do
     @moduledoc false
-    defstruct [:op, :expr, :file, :line, params: []]
+    defstruct [:op, :expr, :file, :line, params: [], subqueries: []]
   end
 
   defmodule SelectExpr do
     @moduledoc false
-    defstruct [:expr, :file, :line, :fields, params: [], take: %{}]
+    defstruct [:expr, :file, :line, :fields, params: [], take: %{}, subqueries: [], aliases: %{}]
   end
 
   defmodule JoinExpr do
     @moduledoc false
-    defstruct [:qual, :source, :on, :file, :line, :assoc, :as, :ix, :prefix, params: [], hints: []]
+    defstruct [
+      :qual,
+      :source,
+      :on,
+      :file,
+      :line,
+      :assoc,
+      :as,
+      :ix,
+      :prefix,
+      params: [],
+      hints: []
+    ]
   end
 
   defmodule WithExpr do
     @moduledoc false
-    defstruct [recursive: false, queries: []]
+    defstruct recursive: false, queries: []
+  end
+
+  defmodule LimitExpr do
+    @moduledoc false
+    defstruct [:expr, :file, :line, with_ties: false, params: []]
   end
 
   defmodule Tagged do
@@ -399,24 +473,77 @@ defmodule Ecto.Query do
     # * value is the tagged value
     # * tag is the directly tagged value, like Ecto.UUID
     # * type is the underlying tag type, like :string
-    defstruct [:value, :tag, :type]
+    defstruct [:tag, :type, :value]
+  end
+
+  defmodule Values do
+    @moduledoc false
+    defstruct [:types, :num_rows, :params]
+
+    def new(values_list, types) do
+      fields = fields(values_list)
+      types = types!(fields, types)
+      params = params!(values_list, types)
+      %__MODULE__{types: types, params: params, num_rows: length(values_list)}
+    end
+
+    defp fields(values_list) do
+      fields =
+        Enum.reduce(values_list, MapSet.new(), fn values, fields ->
+          Enum.reduce(values, fields, fn {field, _}, fields ->
+            MapSet.put(fields, field)
+          end)
+        end)
+
+      MapSet.to_list(fields)
+    end
+
+    defp types!(fields, types) do
+      Enum.map(fields, fn field ->
+        case types do
+          %{^field => type} ->
+            {field, type}
+
+          _ ->
+            raise ArgumentError,
+                  "values/2 must declare the type for every field. " <>
+                    "The type was not given for field `#{field}`"
+        end
+      end)
+    end
+
+    defp params!(values_list, types) do
+      Enum.reduce(values_list, [], fn values, params ->
+        Enum.reduce(types, params, fn {field, type}, params ->
+          case values do
+            %{^field => value} ->
+              [{value, type} | params]
+
+            _ ->
+              raise ArgumentError,
+                    "each member of a values list must have the same fields. " <>
+                      "Missing field `#{field}` in #{inspect(values)}"
+          end
+        end)
+      end)
+    end
   end
 
   @type t :: %__MODULE__{}
-  @opaque dynamic :: %DynamicExpr{}
+  @type dynamic_expr :: %DynamicExpr{}
 
   alias Ecto.Query.Builder
 
   @doc """
   Builds a dynamic query expression.
 
-  Dynamic query expressions allows developers to build queries
-  expression bit by bit so they are later interpolated in a query.
+  Dynamic query expressions allow developers to compose query
+  expressions bit by bit, so that they can be interpolated into
+  parts of a query or another dynamic expression later on.
 
   ## Examples
 
-  For example, imagine you have a set of conditions you want to
-  build your query on:
+  Imagine you have a set of conditions you want to build your query on:
 
       conditions = false
 
@@ -438,12 +565,12 @@ defmodule Ecto.Query do
 
   In the example above, we were able to build the query expressions
   bit by bit, using different bindings, and later interpolate it all
-  at once inside the query.
+  at once into the actual query.
 
   A dynamic expression can always be interpolated inside another dynamic
   expression and into the constructs described below.
 
-  ## `where`, `having` and a `join`'s `on'
+  ## `where`, `having` and a `join`'s `on`
 
   The `dynamic` macro can be interpolated at the root of a `where`,
   `having` or a `join`'s `on`.
@@ -454,10 +581,23 @@ defmodule Ecto.Query do
 
       from q in query, where: q.some_condition and ^conditions
 
-  Fortunately that's easily solvable by simply rewriting it to:
+  Fortunately that's easily solved by simply rewriting it to:
 
       conditions = dynamic([q], q.some_condition and ^conditions)
       from query, where: ^conditions
+
+  > ### Dynamic boundaries {: .warning}
+  >
+  > Type casting does not cross dynamic boundaries. When you write
+  > a dynamic expression, such as `dynamic([p], p.visits > ^param)`,
+  > Ecto will automatically cast `^param` to the type of `p.visits`.
+  >
+  > However, if `p.visits` is in itself dynamic, as in the example
+  > below, then Ecto won't be able to propagate its type to `^param`:
+  >
+  >     field = dynamic([p], p.visits)
+  >     dynamic(^field > ^param)
+  >
 
   ## `order_by`
 
@@ -466,7 +606,7 @@ defmodule Ecto.Query do
 
       order_by = [
         asc: :some_field,
-        desc: dynamic([p], fragment("?>>?", p.another_field, "json_key"))
+        desc: dynamic([p], fragment("?->>?", p.another_field, "json_key"))
       ]
 
       from query, order_by: ^order_by
@@ -489,7 +629,7 @@ defmodule Ecto.Query do
 
       group_by = [
         :some_field,
-        dynamic([p], fragment("?>>?", p.another_field, "json_key"))
+        dynamic([p], fragment("?->>?", p.another_field, "json_key"))
       ]
 
       from query, group_by: ^group_by
@@ -503,17 +643,108 @@ defmodule Ecto.Query do
 
   But this will:
 
-      from query, order_by: ^[:some_field, dynamic(...)]
+      from query, group_by: ^[:some_field, dynamic(...)]
 
-  ## Updates
+  ## `select` and `select_merge`
 
-  Dynamic is also supported inside updates, for example:
+  Dynamics can be inside maps interpolated at the root of a
+  `select` or `select_merge`. For example, you can write:
+
+      fields = %{
+        period: dynamic([p], p.month),
+        metric: dynamic([p], p.distance)
+      }
+
+      from query, select: ^fields
+
+  As with `where` and friends, it is not possible to pass dynamics
+  outside of a root. For example, this won't work:
+
+      from query, select: %{field: ^dynamic(...)}
+
+  But this will:
+
+      from query, select: ^%{field: dynamic(...)}
+
+  Maps with dynamics can also be merged into existing `select` structures,
+  enabling a variety of possibilities for partially dynamic selects:
+
+      metric = dynamic([p], p.distance)
+
+      from query, select: [:period, :metric], select_merge: ^%{metric: metric}
+
+  Aliasing fields with `selected_as/2` and referencing them with `selected_as/1`
+  is also allowed:
+
+      fields = %{
+        period: dynamic([p], selected_as(p.month, :month)),
+        metric: dynamic([p], p.distance)
+      }
+
+      order = dynamic(selected_as(:month))
+
+      from query, select: ^fields, order_by: ^order
+
+  ## `update`
+
+  A `dynamic` is also supported inside updates, for example:
 
       updates = [
         set: [average: dynamic([p], p.sum / p.count)]
       ]
 
       from query, update: ^updates
+
+  ## `preload`
+
+  Dynamics can be used with `preload` in order to dynamically
+  specify the binding for a joined association. For example, you can
+  write:
+
+      preloads = [
+        :non_joined_assoc,
+        joined_assoc: dynamic([joined: j], j)
+      ]
+
+      from x in query,
+        join: assoc(x, :joined_assoc),
+        as: :joined,
+        preload: ^preloads
+
+  While the example above uses a named binding (`:joined`),
+  positional bindings may also be used:
+
+      preloads = [
+        :non_joined_assoc,
+        joined_assoc: dynamic([_, j], j)
+      ]
+
+      from x in query,
+        join: assoc(x, :joined_assoc)
+        preload: ^preloads
+
+  As with `where` and friends, it is not possible to pass dynamics
+  outside of an interpolated root. For example, this won't work:
+
+      from query, preload: [comments: ^dynamic(...)]
+
+  But this will:
+
+      from query, preload: ^[comments: dynamic(...)]
+
+  Dynamic expressions used in `preload` must evaluate to a single
+  binding. For instance, this won't work:
+
+      preloads = dynamic([comments: c, likes: l], [comments: {c, likes: l}])
+
+  But this will:
+
+      dynamic_comments = dynamic([comments: c], c)
+      dynamic_likes = dynamic([likes: l], l)
+
+      preloads = [
+        comments: {dynamic_comments, likes: dynamic_likes}
+      ]
   """
   defmacro dynamic(binding \\ [], expr) do
     Builder.Dynamic.build(binding, expr, __CALLER__)
@@ -566,7 +797,7 @@ defmodule Ecto.Query do
 
   ## Examples
 
-      # compare each employee's salary for each month with his average salary for previous 3 months
+      # Compare each employee's salary for each month with his average salary for previous 3 months
       from p in Payroll,
         select: {p.empno, p.date, p.salary, over(avg(p.salary), :prev_months)},
         windows: [prev_months: [partition_by: p.empno, order_by: p.date, frame: fragment("ROWS 3 PRECEDING EXCLUDE CURRENT ROW")]]
@@ -583,8 +814,12 @@ defmodule Ecto.Query do
   If any other value is given, it is converted to a query via
   `Ecto.Queryable` and wrapped in the `Ecto.SubQuery` struct.
 
-  Subqueries are currently only supported in the `from`
-  and `join` fields.
+  `subquery` is supported in:
+
+    * `from`,
+    * `join`,
+    * `where`, in the form `p.x in subquery(q)`,
+    * `select` and `select_merge`, in the form of `%{field: subquery(...)}`.
 
   ## Examples
 
@@ -597,9 +832,8 @@ defmodule Ecto.Query do
       query = from Employee, order_by: [desc: :salary], limit: 10
       from e in subquery(query, prefix: "my_prefix"), select: avg(e.salary)
 
-  Although subqueries are not allowed in WHERE expressions,
-  most subqueries in WHERE expression can be rewritten as JOINs.
-  Imagine you want to write this query:
+
+  Subquery can also be used in a `join` expression.
 
       UPDATE posts
         SET sync_started_at = $1
@@ -609,28 +843,44 @@ defmodule Ecto.Query do
             LIMIT $2
         )
 
-  If you attempt to write it as `where: p.id in ^subquery(foo)`,
-  Ecto won't accept such query. However, the subquery above can be
-  written as a JOIN, which is supported by Ecto. The final Ecto
-  query will look like this:
+  We can write it as a join expression:
 
-      subset_query = from(p in Post,
+      subset = from(p in Post,
         where: p.synced == false and
                  (is_nil(p.sync_started_at) or p.sync_started_at < ^min_sync_started_at),
         limit: ^batch_size
       )
 
       Repo.update_all(
-        from(p in Post, join: s in subquery(subset_query), on: s.id == p.id),
+        from(p in Post, join: s in subquery(subset), on: s.id == p.id),
         set: [sync_started_at: NaiveDateTime.utc_now()]
       )
 
+  Or as a `where` condition:
+
+      subset_ids = from(p in subset, select: p.id)
+      Repo.update_all(
+        from(p in Post, where: p.id in subquery(subset_ids)),
+        set: [sync_started_at: NaiveDateTime.utc_now()]
+      )
+
+  If you need to refer to a parent binding which is not known when writing the subquery,
+  you can use `parent_as` as shown in the examples under "Named bindings" in this module doc.
+
+  You can also use subquery directly in `select` and `select_merge`:
+
+      comments_count = from(c in Comment, where: c.post_id == parent_as(:post).id, select: count())
+      from(p in Post, as: :post, select: %{id: p.id, comments: subquery(comments_count)})
   """
   def subquery(query, opts \\ []) do
     subquery = wrap_in_subquery(query)
+
     case Keyword.fetch(opts, :prefix) do
-      {:ok, prefix} when is_binary(prefix) or is_nil(prefix) -> put_in(subquery.query.prefix, prefix)
-      :error -> subquery
+      {:ok, prefix} when is_binary(prefix) or is_nil(prefix) ->
+        put_in(subquery.query.prefix, prefix)
+
+      :error ->
+        subquery
     end
   end
 
@@ -638,8 +888,30 @@ defmodule Ecto.Query do
   defp wrap_in_subquery(%Ecto.Query{} = query), do: %Ecto.SubQuery{query: query}
   defp wrap_in_subquery(queryable), do: %Ecto.SubQuery{query: Ecto.Queryable.to_query(queryable)}
 
-  @joins [:join, :inner_join, :cross_join, :left_join, :right_join, :full_join,
-          :inner_lateral_join, :left_lateral_join]
+  @joins [
+    :join,
+    :inner_join,
+    :cross_join,
+    :cross_lateral_join,
+    :left_join,
+    :right_join,
+    :full_join,
+    :inner_lateral_join,
+    :left_lateral_join,
+    :array_join,
+    :left_array_join
+  ]
+
+  @doc """
+  Puts the given prefix in a query.
+  """
+  def put_query_prefix(%Ecto.Query{} = query, prefix) when is_binary(prefix) do
+    %{query | prefix: prefix}
+  end
+
+  def put_query_prefix(other, prefix) when is_binary(prefix) do
+    other |> Ecto.Queryable.to_query() |> put_query_prefix(prefix)
+  end
 
   @doc """
   Resets a previously set field on a query.
@@ -663,17 +935,21 @@ defmodule Ecto.Query do
       Ecto.Query.exclude(query, :offset)
       Ecto.Query.exclude(query, :lock)
       Ecto.Query.exclude(query, :preload)
+      Ecto.Query.exclude(query, :update)
 
   You can also remove specific joins as well such as `left_join` and
   `inner_join`:
 
       Ecto.Query.exclude(query, :inner_join)
       Ecto.Query.exclude(query, :cross_join)
+      Ecto.Query.exclude(query, :cross_lateral_join)
       Ecto.Query.exclude(query, :left_join)
       Ecto.Query.exclude(query, :right_join)
       Ecto.Query.exclude(query, :full_join)
       Ecto.Query.exclude(query, :inner_lateral_join)
       Ecto.Query.exclude(query, :left_lateral_join)
+      Ecto.Query.exclude(query, :array_join)
+      Ecto.Query.exclude(query, :left_array_join)
 
   However, keep in mind that if a join is removed and its bindings
   were referenced elsewhere, the bindings won't be removed, leading
@@ -685,12 +961,14 @@ defmodule Ecto.Query do
   defp do_exclude(%Ecto.Query{} = query, :join) do
     %{query | joins: [], aliases: Map.take(query.aliases, [query.from.as])}
   end
+
   defp do_exclude(%Ecto.Query{} = query, join_keyword) when join_keyword in @joins do
     qual = join_qual(join_keyword)
     {excluded, remaining} = Enum.split_with(query.joins, &(&1.qual == qual))
-    aliases =  Map.drop(query.aliases, Enum.map(excluded, & &1.as))
+    aliases = Map.drop(query.aliases, Enum.map(excluded, & &1.as))
     %{query | joins: remaining, aliases: aliases}
   end
+
   defp do_exclude(%Ecto.Query{} = query, :where), do: %{query | wheres: []}
   defp do_exclude(%Ecto.Query{} = query, :order_by), do: %{query | order_bys: []}
   defp do_exclude(%Ecto.Query{} = query, :group_by), do: %{query | group_bys: []}
@@ -703,6 +981,7 @@ defmodule Ecto.Query do
   defp do_exclude(%Ecto.Query{} = query, :offset), do: %{query | offset: nil}
   defp do_exclude(%Ecto.Query{} = query, :lock), do: %{query | lock: nil}
   defp do_exclude(%Ecto.Query{} = query, :preload), do: %{query | preloads: [], assocs: []}
+  defp do_exclude(%Ecto.Query{} = query, :update), do: %{query | updates: []}
 
   @doc """
   Creates a query.
@@ -710,8 +989,8 @@ defmodule Ecto.Query do
   It can either be a keyword query or a query expression.
 
   If it is a keyword query the first argument must be
-  either an `in` expression, or a value that implements
-  the `Ecto.Queryable` protocol. If the query needs a
+  either an `in` expression, a value that implements
+  the `Ecto.Queryable` protocol, or an `Ecto.Query.API.fragment/1`. If the query needs a
   reference to the data source in any other part of the
   expression, then an `in` must be used to create a reference
   variable. The second argument should be a keyword query
@@ -722,13 +1001,63 @@ defmodule Ecto.Query do
   a value that implements the `Ecto.Queryable` protocol
   and the second argument the expression.
 
-  ## Keywords example
+  ## Hints
 
+  The `hints` keyword can be used to specify query hints:
+
+      from p in Post,
+        hints: ["USE INDEX FOO"],
+        where: p.title == "title"
+
+  It can also be used as a general mechanism for adding statements that
+  come after the `from` clause. For example, it can be used to enable
+  table sampling:
+
+      from p in Post,
+        hints: "TABLESAMPLE SYSTEM(1)"
+
+  `from` hints must be a (list of) compile-time strings or unsafe fragments. An unsafe
+  fragment can be used to specify dynamic hints:
+
+      sample = "SYSTEM_ROWS(1)"
+
+      from p in Post,
+        hints: ["TABLESAMPLE", unsafe_fragment(^sample)]
+
+  > ### Unsafe Fragments {: .warning}
+  >
+  > The output of `unsafe_fragment/1` will be injected directly into the
+  > resulting SQL statement without being escaped. For this reason, input
+  > from uncontrolled sources, such as user input, should **never** be used.
+  > Otherwise, it could lead to harmful SQL injection attacks.
+
+  ## Keywords examples
+
+      # `in` expression
       from(c in City, select: c)
 
-  ## Expressions example
+      # Ecto.Queryable
+      from(City, limit: 1)
 
+      # Fragment with user-defined function and predefined columns
+      from(f in fragment("my_table_valued_function(arg)"), select: f.x)
+
+      # Fragment with built-in function and undefined columns
+      from(f in fragment("select generate_series(?::integer, ?::integer) as x", ^0, ^10), select: f.x)
+
+  ## Expressions examples
+
+      # Schema
       City |> select([c], c)
+
+      # Source
+      "cities" |> select([c], c)
+
+      # Source with schema
+      {"cities", Source} |> select([c], c)
+
+      # Ecto.Query
+      from(c in Cities) |> select([c], c)
 
   ## Examples
 
@@ -756,7 +1085,7 @@ defmodule Ecto.Query do
         where: not(is_nil(p.published_at)) and not(is_nil(o.published_at))
       end
 
-  Note the variables `p` and `o` can be named whatever you like
+  Note that the variables `p` and `o` can be named whatever you like
   as they have no importance in the query sent to the database.
   """
   defmacro from(expr, kw \\ []) do
@@ -765,16 +1094,19 @@ defmodule Ecto.Query do
     end
 
     {kw, as, prefix, hints} = collect_as_and_prefix_and_hints(kw, nil, nil, nil)
-    {quoted, binds, count_bind} = Builder.From.build(expr, __CALLER__, as, prefix, hints)
+
+    {quoted, binds, count_bind} =
+      Builder.From.build(expr, __CALLER__, as, prefix, List.wrap(hints))
+
     from(kw, __CALLER__, count_bind, quoted, to_query_binds(binds))
   end
 
   @from_join_opts [:as, :prefix, :hints]
-  @no_binds [:lock, :union, :union_all, :except, :except_all, :intersect, :intersect_all]
-  @binds [:where, :or_where, :select, :distinct, :order_by, :group_by, :windows] ++
+  @no_binds [:union, :union_all, :except, :except_all, :intersect, :intersect_all]
+  @binds [:lock, :where, :or_where, :select, :distinct, :order_by, :group_by, :windows] ++
            [:having, :or_having, :limit, :offset, :preload, :update, :select_merge, :with_ctes]
 
-  defp from([{type, expr}|t], env, count_bind, quoted, binds) when type in @binds do
+  defp from([{type, expr} | t], env, count_bind, quoted, binds) when type in @binds do
     # If all bindings are integer indexes keep AST Macro expandable to %Query{},
     # otherwise ensure that quoted code is evaluated before macro call
     quoted =
@@ -789,10 +1121,12 @@ defmodule Ecto.Query do
         end
       end
 
+    {t, quoted} = maybe_with_ties(type, t, quoted, binds)
+
     from(t, env, count_bind, quoted, binds)
   end
 
-  defp from([{type, expr}|t], env, count_bind, quoted, binds) when type in @no_binds do
+  defp from([{type, expr} | t], env, count_bind, quoted, binds) when type in @no_binds do
     quoted =
       quote do
         Ecto.Query.unquote(type)(unquote(quoted), unquote(expr))
@@ -801,7 +1135,7 @@ defmodule Ecto.Query do
     from(t, env, count_bind, quoted, binds)
   end
 
-  defp from([{join, expr}|t], env, count_bind, quoted, binds) when join in @joins do
+  defp from([{join, expr} | t], env, count_bind, quoted, binds) when join in @joins do
     qual = join_qual(join)
     {t, on, as, prefix, hints} = collect_on(t, nil, nil, nil, nil)
 
@@ -811,21 +1145,43 @@ defmodule Ecto.Query do
     from(t, env, count_bind, quoted, to_query_binds(binds))
   end
 
-  defp from([{:on, _value}|_], _env, _count_bind, _quoted, _binds) do
-    Builder.error! "`on` keyword must immediately follow a join"
+  defp from([{:with_ties, _value} | _], _env, _count_bind, _quoted, _binds) do
+    Builder.error!("`with_ties` keyword must immediately follow a limit")
   end
 
-  defp from([{key, _value}|_], _env, _count_bind, _quoted, _binds) when key in @from_join_opts do
-    Builder.error! "`#{key}` keyword must immediately follow a from/join"
+  defp from([{:on, _value} | _], _env, _count_bind, _quoted, _binds) do
+    Builder.error!("`on` keyword must immediately follow a join")
   end
 
-  defp from([{key, _value}|_], _env, _count_bind, _quoted, _binds) do
-    Builder.error! "unsupported #{inspect key} in keyword query expression"
+  defp from([{key, _value} | _], _env, _count_bind, _quoted, _binds)
+       when key in @from_join_opts do
+    Builder.error!("`#{key}` keyword must immediately follow a from/join")
+  end
+
+  defp from([{key, _value} | _], _env, _count_bind, _quoted, _binds) do
+    Builder.error!("unsupported #{inspect(key)} in keyword query expression")
   end
 
   defp from([], _env, _count_bind, quoted, _binds) do
     quoted
   end
+
+  defp maybe_with_ties(:limit, t, quoted, binds) do
+    {t, with_ties} = collect_with_ties(t, nil)
+
+    quoted =
+      if with_ties != nil do
+        quote do
+          Ecto.Query.with_ties(unquote(quoted), unquote(binds), unquote(with_ties))
+        end
+      else
+        quoted
+      end
+
+    {t, quoted}
+  end
+
+  defp maybe_with_ties(_type, t, quoted, _binds), do: {t, quoted}
 
   defp to_query_binds(binds) do
     for {k, v} <- binds, do: {{k, [], nil}, v}
@@ -837,8 +1193,20 @@ defmodule Ecto.Query do
   defp join_qual(:right_join), do: :right
   defp join_qual(:inner_join), do: :inner
   defp join_qual(:cross_join), do: :cross
+  defp join_qual(:cross_lateral_join), do: :cross_lateral
   defp join_qual(:left_lateral_join), do: :left_lateral
   defp join_qual(:inner_lateral_join), do: :inner_lateral
+  defp join_qual(:array_join), do: :array
+  defp join_qual(:left_array_join), do: :left_array
+
+  defp collect_with_ties([{:with_ties, with_ties} | t], nil),
+    do: collect_with_ties(t, with_ties)
+
+  defp collect_with_ties([{:with_ties, _} | _], _),
+    do: Builder.error!("`with_ties` keyword was given more than once to the same limit")
+
+  defp collect_with_ties(t, with_ties),
+    do: {t, with_ties}
 
   defp collect_on([{key, _} | _] = t, on, as, prefix, hints) when key in @from_join_opts do
     {t, as, prefix, hints} = collect_as_and_prefix_and_hints(t, as, prefix, hints)
@@ -847,23 +1215,31 @@ defmodule Ecto.Query do
 
   defp collect_on([{:on, on} | t], nil, as, prefix, hints),
     do: collect_on(t, on, as, prefix, hints)
+
   defp collect_on([{:on, expr} | t], on, as, prefix, hints),
     do: collect_on(t, {:and, [], [on, expr]}, as, prefix, hints)
+
   defp collect_on(t, on, as, prefix, hints),
     do: {t, on, as, prefix, hints}
 
   defp collect_as_and_prefix_and_hints([{:as, as} | t], nil, prefix, hints),
     do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+
   defp collect_as_and_prefix_and_hints([{:as, _} | _], _, _, _),
-    do: Builder.error! "`as` keyword was given more than once to the same from/join"
+    do: Builder.error!("`as` keyword was given more than once to the same from/join")
+
   defp collect_as_and_prefix_and_hints([{:prefix, prefix} | t], as, nil, hints),
-    do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+    do: collect_as_and_prefix_and_hints(t, as, {:ok, prefix}, hints)
+
   defp collect_as_and_prefix_and_hints([{:prefix, _} | _], _, _, _),
-    do: Builder.error! "`prefix` keyword was given more than once to the same from/join"
+    do: Builder.error!("`prefix` keyword was given more than once to the same from/join")
+
   defp collect_as_and_prefix_and_hints([{:hints, hints} | t], as, prefix, nil),
     do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+
   defp collect_as_and_prefix_and_hints([{:hints, _} | _], _, _, _),
-    do: Builder.error! "`hints` keyword was given more than once to the same from/join"
+    do: Builder.error!("`hints` keyword was given more than once to the same from/join")
+
   defp collect_as_and_prefix_and_hints(t, as, prefix, hints),
     do: {t, as, prefix, hints}
 
@@ -872,16 +1248,18 @@ defmodule Ecto.Query do
 
   Receives a source that is to be joined to the query and a condition for
   the join. The join condition can be any expression that evaluates
-  to a boolean value. The join is by default an inner join, the qualifier
-  can be changed by giving the atoms: `:inner`, `:left`, `:right`, `:cross`,
-  `:full`, `:inner_lateral` or `:left_lateral`. For a keyword query the `:join`
-  keyword can be changed to: `:inner_join`, `:left_join`, `:right_join`,
-  `:cross_join`, `:full_join`, `:inner_lateral_join` or `:left_lateral_join`.
+  to a boolean value. The qualifier must be one of `:inner`, `:left`,
+  `:right`, `:cross`, `:cross_lateral`, `:full`, `:inner_lateral`, `:left_lateral`,
+  `:array` or `:left_array`.
+
+  For a keyword query the `:join` keyword can be changed to `:inner_join`,
+  `:left_join`, `:right_join`, `:cross_join`, `:cross_lateral_join`, `:full_join`, `:inner_lateral_join`,
+  `:left_lateral_join`, `:array_join` or `:left_array_join`. `:join` is equivalent to `:inner_join`.
 
   Currently it is possible to join on:
 
     * an `Ecto.Schema`, such as `p in Post`
-    * an interpolated Ecto query with zero or more where clauses,
+    * an interpolated Ecto query with zero or more `where` clauses,
       such as `c in ^(from "posts", where: [public: true])`
     * an association, such as `c in assoc(post, :comments)`
     * a subquery, such as `c in subquery(another_query)`
@@ -892,7 +1270,7 @@ defmodule Ecto.Query do
 
   Each join accepts the following options:
 
-    * `:on` - a query expression or keyword list to filter the join
+    * `:on` - a query expression or keyword list to filter the join, defaults to `true`
     * `:as` - a named binding for the join
     * `:prefix` - the prefix to be used for the join when issuing a database query
     * `:hints` - a string or a list of strings to be used as database hints
@@ -900,6 +1278,16 @@ defmodule Ecto.Query do
   In the keyword query syntax, those options must be given immediately
   after the join. In the expression syntax, the options are given as
   the fifth argument.
+
+  > ### Unspecified join condition {: .warning}
+  >
+  > Leaving the `:on` option unspecified while performing a join
+  > that is not a cross join will trigger a warning. This is to
+  > help users avoid performing expensive cross joins when they don't
+  > mean to. If the behaviour is desired, you may remove the warning by
+  > changing to a cross join or explicitly setting `on: true`. If
+  > the behaviour is not desired, you should specify the appropriate
+  > join condition.
 
   ## Keywords examples
 
@@ -921,7 +1309,7 @@ defmodule Ecto.Query do
 
   Any key in `on` will apply to the currently joined expression.
 
-  It is also possible to interpolate an Ecto query on the right side
+  It is also possible to interpolate an Ecto query on the right-hand side
   of `in`. For example, the query above can also be written as:
 
       posts = Post
@@ -947,7 +1335,7 @@ defmodule Ecto.Query do
         select: {p.title, c.text}
 
   Only simple queries with `where` expressions can be interpolated
-  in join.
+  in a join.
 
   ## Expressions examples
 
@@ -970,25 +1358,38 @@ defmodule Ecto.Query do
       Comment
       |> join(:inner, [c], p in fragment("SOME COMPLEX QUERY", c.id, ^some_param))
 
-  Although using fragments in joins is discouraged in favor of Ecto
-  Query syntax, they are necessary when writing lateral joins as
-  lateral joins require a subquery that refer to previous bindings:
-
-      Game
-      |> join(:inner_lateral, [g], gs in fragment("SELECT * FROM games_sold AS gs WHERE gs.game_id = ? ORDER BY gs.sold_on LIMIT 2", g.id))
-      |> select([g, gs], {g.name, gs.sold_on})
-
   Note that the `join` does not automatically wrap the fragment in
   parentheses, since some expressions require parens and others
   require no parens. Therefore, in cases such as common table
   expressions, you will have to explicitly wrap the fragment content
   in parens.
 
+  ## Lateral Joins
+
+  Lateral joins require a subquery that refer to previous bindings. This can be achieved using
+  `parent_as` within the `subquery` function:
+
+      Game
+      |> from(as: :game)
+      |> join(
+        :inner_lateral,
+        [],
+        subquery(
+          GamesSold
+          |> where([gs], gs.game_id == parent_as(:game).id)
+          |> order_by([gs], gs.sold_on)
+          |> limit(2)
+        ),
+        on: true
+      )
+      |> select([g, gs], {g.name, gs.sold_on})
+
   ## Hints
 
-  `from` and `join` also support index hints, as found in databases such as
-  [MySQL](https://dev.mysql.com/doc/refman/8.0/en/index-hints.html) and
-  [MSSQL](https://docs.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-2017).
+  `join` also supports table hints, as found in databases such as
+  [MySQL](https://dev.mysql.com/doc/refman/8.0/en/index-hints.html),
+  [MSSQL](https://docs.microsoft.com/en-us/sql/t-sql/queries/hints-transact-sql-table?view=sql-server-2017) and
+  [Clickhouse](https://clickhouse.tech/docs/en/sql-reference/statements/select/sample/).
 
   For example, a developer using MySQL may write:
 
@@ -1000,17 +1401,33 @@ defmodule Ecto.Query do
 
   Keep in mind you want to use hints rarely, so don't forget to read the database
   disclaimers about such functionality.
+
+  Join hints must be static compile-time strings when they are specified as (list of) strings.
+
+  ## Array joins
+
+  The `:array` and `:left_array` qualifiers can be used to join with array
+  columns in [Clickhouse:](https://clickhouse.com/docs/en/sql-reference/statements/select/array-join)
+
+      from at in "arrays_test",
+        array_join: a in "arr",
+        select: %{s: at.s, arr: a}
+
+  Note that only the columns in the base table (i.e. the table referenced in `FROM`) can be used in the array join.
+
   """
   @join_opts [:on | @from_join_opts]
 
   defmacro join(query, qual, binding \\ [], expr, opts \\ [])
+
   defmacro join(query, qual, binding, expr, opts)
            when is_list(binding) and is_list(opts) do
     {t, on, as, prefix, hints} = collect_on(opts, nil, nil, nil, nil)
 
     with [{key, _} | _] <- t do
-      raise ArgumentError, "invalid option `#{key}` passed to Ecto.Query.join/5, " <>
-                             "valid options are: #{inspect(@join_opts)}"
+      raise ArgumentError,
+            "invalid option `#{key}` passed to Ecto.Query.join/5, " <>
+              "valid options are: #{inspect(@join_opts)}"
     end
 
     query
@@ -1019,11 +1436,18 @@ defmodule Ecto.Query do
   end
 
   defmacro join(_query, _qual, binding, _expr, opts) when is_list(opts) do
-    raise ArgumentError, "invalid binding passed to Ecto.Query.join/5, should be " <>
-                           "list of variables, got: #{Macro.to_string(binding)}"
+    raise ArgumentError,
+          "invalid binding passed to Ecto.Query.join/5, should be " <>
+            "list of variables, got: #{Macro.to_string(binding)}"
   end
 
-  @doc """
+  defmacro join(_query, _qual, _binding, _expr, opts) do
+    raise ArgumentError,
+          "invalid opts passed to Ecto.Query.join/5, should be " <>
+            "list, got: #{Macro.to_string(opts)}"
+  end
+
+  @doc ~S'''
   A common table expression (CTE) also known as WITH expression.
 
   `name` must be a compile-time literal string that is being used
@@ -1045,7 +1469,13 @@ defmodule Ecto.Query do
 
   ## Options
 
-    * `:as` – the CTE query itself or a fragment
+    * `:as` - the CTE query itself or a fragment
+    * `:materialized` - a boolean indicating whether the CTE should
+    be materialized. If blank, the database's default behaviour
+    will be used (only supported by Postgrex, for the built-in adapters)
+    * `:operation` - one of `:all`, `:update_all`, or `:delete_all`
+    indicating the operation type of the CTE query. If blank, it defaults to `:all`,
+    making the CTE query a SELECT query. (only supported by Postgres built-in adapter)
 
   ## Recursive CTEs
 
@@ -1053,7 +1483,7 @@ defmodule Ecto.Query do
 
   In the CTE query itself use the same table name to leverage
   recursion that has been passed to the `name` argument. Make sure
-  to write a stop condition to avoid infinite recursion loop.
+  to write a stop condition to avoid an infinite recursion loop.
   Generally speaking, you should only use CTEs in Ecto for
   writing recursive queries.
 
@@ -1080,7 +1510,23 @@ defmodule Ecto.Query do
       |> group_by([p], p.id)
       |> select([p, c], %{p | category_names: fragment("ARRAY_AGG(?)", c.name)})
 
-  It's possible to cast CTE result rows as Ecto structs:
+  It's also possible to pass a raw SQL fragment:
+
+      @raw_sql_category_tree """
+      SELECT * FROM categories WHERE c.parent_id IS NULL
+      UNION ALL
+      SELECT * FROM categories AS c, category_tree AS ct WHERE ct.id = c.parent_id
+      """
+
+      Product
+      |> recursive_ctes(true)
+      |> with_cte("category_tree", as: fragment(@raw_sql_category_tree))
+      |> join(:inner, [p], c in "category_tree", on: c.id == p.category_id)
+
+  You can also query over the CTE table itself. In such cases, you can pass
+  tuple with the CTE table name as the first element and an Ecto schema as the second
+  element. This will cast the result rows to Ecto structs as long as the Ecto
+  schema maps over the same fields in the CTE table:
 
       {"category_tree", Category}
       |> recursive_ctes(true)
@@ -1089,34 +1535,55 @@ defmodule Ecto.Query do
       |> group_by([c], c.id)
       |> select([c, p], %{c | products_count: count(p.id)})
 
-  It's also possible to pass a raw SQL fragment:
+  Keep in mind that the query above will inherit all properties from the `Category` schema,
+  include a `@schema_prefix` if any is set. In such cases, you can disable those properties
+  by setting them as option:
 
-      @raw_sql_category_tree \"""
-      SELECT * FROM categories WHERE c.parent_id IS NULL
-      UNION ALL
-      SELECT * FROM categories AS c, category_tree AS ct WHERE ct.id = c.parent_id
-      \"""
-
-      Product
+      from(cte in {"category_tree", Category}, prefix: nil)
       |> recursive_ctes(true)
-      |> with_cte("category_tree", as: fragment(@raw_sql_category_tree))
-      |> join(:inner, [p], c in "category_tree", on: c.id == p.category_id)
+      |> with_cte("category_tree", as: ^category_tree_query)
+
+  For Postgres built-in adapter, it is possible to define data-modifying CTE queries:
+
+      update_categories_query =
+        Category
+        |> where([c], is_nil(c.parent_id))
+        |> update([c], set: [name: "Root category"])
+        |> select([c], c)
+
+      {"update_categories", Category}
+      |> with_cte("update_categories", as: ^update_categories_query, operation: :update_all)
+      |> select([c], c)
+
+  Note: In order to retrieve the updates rows from a CTE query, the parent query
+  must select rows from the CTE table instead of the table referenced by the CTE query.
+  For example, `"update_categories"` will return updates rows for `"category"` table, but
+  selecting from `"category"` table directly will return unaffected rows.
+  For more details see Postgres documentation on data-modifying CTEs and how these work
+  with snapshots.
 
   Keyword syntax is not supported for this feature.
 
-  ## Limitation: CTEs on schemas wth source fields
+  ## Limitation: CTEs on schemas with source fields
 
   Ecto allows developers to say that a table in their Ecto schema
-  map to a different column in their database:
+  maps to a different column in their database:
 
       field :group_id, :integer, source: :iGroupId
 
   At the moment, using a schema with source fields in CTE may emit
   invalid queries. If you are running into such scenarios, your best
   option is to use a fragment as your CTE.
-  """
-  defmacro with_cte(query, name, as: with_query) do
-    Builder.CTE.build(query, name, with_query, __CALLER__)
+  '''
+  defmacro with_cte(query, name, opts) do
+    with_query = opts[:as]
+    operation = opts[:operation]
+
+    if !with_query do
+      Builder.error!("`as` option must be specified")
+    end
+
+    Builder.CTE.build(query, name, with_query, opts[:materialized], operation, __CALLER__)
   end
 
   @doc """
@@ -1147,7 +1614,7 @@ defmodule Ecto.Query do
   shown in the examples below. A full schema can also be selected.
 
   There can only be one select expression in a query, if the select expression
-  is omitted, the query will by default select the full schema. If select is
+  is omitted, the query will by default select the full schema. If `select` is
   given more than once, an error is raised. Use `exclude/2` if you would like
   to remove a previous select for overriding or see `select_merge/3` for a
   limited version of `select` that is composable and can be called multiple
@@ -1179,6 +1646,12 @@ defmodule Ecto.Query do
       from(city in City, select: map(city, [:name]))
 
   If you want a map with only the selected fields to be returned.
+
+  To select a struct but omit only given fields, you can
+  override them with `nil` or another default value:
+
+      from(city in City, select: %{city | geojson: nil, text: "<redacted>"})
+
   For more information, read the docs for `Ecto.Query.API.struct/2`
   and `Ecto.Query.API.map/2`.
 
@@ -1190,7 +1663,17 @@ defmodule Ecto.Query do
       City |> select([:name])
       City |> select([c], struct(c, [:name]))
       City |> select([c], map(c, [:name]))
+      City |> select([c], %{c | geojson: nil, text: "<redacted>"})
 
+  ## Dynamic parts
+
+  Dynamics can be part of a `select` as values in a map that must be interpolated
+  at the root level:
+
+      period = if monthly?, do: dynamic([p], p.month), else: dynamic([p], p.date)
+      metric = if distance?, do: dynamic([p], p.distance), else: dynamic([p], p.time)
+
+      from(c in City, select: ^%{period: period, metric: metric})
   """
   defmacro select(query, binding \\ [], expr) do
     Builder.Select.build(:select, query, binding, expr, __CALLER__)
@@ -1232,8 +1715,28 @@ defmodule Ecto.Query do
   being merged on must be a struct or a map. If it is a struct, the fields
   merged later on must be part of the struct, otherwise an error is raised.
 
+  If the argument to `:select_merge` is a constructed struct
+  (`Ecto.Query.API.struct/2`) or map (`Ecto.Query.API.map/2`) where the source
+  to struct or map may be a `nil` value (as in an outer join), the source will
+  be returned unmodified.
+
+      query =
+        Post
+        |> join(:left, [p], t in Post.Translation,
+          on: t.post_id == p.id and t.locale == ^"en"
+        )
+        |> select_merge([_p, t], map(t, ^~w(title summary)a))
+
+  If there is no English translation for the post, the untranslated post
+  `title` will be returned and `summary` will be `nil`. If there is, both
+  `title` and `summary` will be the value from `Post.Translation`.
+
   `select_merge` cannot be used to set fields in associations, as
   associations are always loaded later, overriding any previous value.
+
+  Dynamics can be part of a `select_merge` as values in a map that must be
+  interpolated at the root level. The rules for merging detailed above apply.
+  This allows merging dynamic values into previously selected maps and structs.
   """
   defmacro select_merge(query, binding \\ [], expr) do
     Builder.Select.build(:merge, query, binding, expr, __CALLER__)
@@ -1303,7 +1806,7 @@ defmodule Ecto.Query do
       filters = [country: "Sweden"]
       from(c in City, where: ^filters)
 
-  ## Expressions example
+  ## Expressions examples
 
       City |> where([c], c.country == "Sweden")
       City |> where(country: "Sweden")
@@ -1381,7 +1884,7 @@ defmodule Ecto.Query do
   "nulls first" or "nulls last" is specific to each database implementation.
 
   `order_by` may be invoked or listed in a query many times. New expressions
-  are always appended to the previous ones.
+  are appended to the existing ones.
 
   `order_by` also accepts a list of atoms where each atom refers to a field in
   source or a keyword list where the direction is given as key and the field
@@ -1404,19 +1907,61 @@ defmodule Ecto.Query do
   A fragment can also be used:
 
       from c in City, order_by: [
-        # a deterministic shuffled order
+        # A deterministic shuffled order
         fragment("? % ? DESC", c.id, ^modulus),
         desc: c.id,
       ]
 
-  ## Expressions example
+  It's also possible to order by an aliased or calculated column:
+
+      from(c in City,
+        select: %{
+          name: c.name,
+          total_population:
+            fragment(
+              "COALESCE(?, ?) + ? AS total_population",
+              c.animal_population,
+              0,
+              c.human_population
+            )
+        },
+        order_by: [
+          # based on `AS total_population` in the previous fragment
+          {:desc, fragment("total_population")}
+        ]
+      )
+
+  ## Expressions examples
 
       City |> order_by([c], asc: c.name, desc: c.population)
       City |> order_by(asc: :name) # Sorts by the cities name
+      City |> order_by(^order_by_param) # Keyword list
 
   """
-  defmacro order_by(query, binding \\ [], expr)  do
-    Builder.OrderBy.build(query, binding, expr, __CALLER__)
+  defmacro order_by(query, binding \\ [], expr) do
+    Builder.OrderBy.build(query, binding, expr, :append, __CALLER__)
+  end
+
+  @doc """
+  An order by query expression that is prepended to existing ones.
+
+  Accepts the same input as `order_by/3` except the expression will
+  come before any previously defined order by expression. This only
+  works with the macro-based query syntax and not the keyword-based
+  query syntax.
+
+  For example, the following will generate a query that orders by `human_popluation`
+  and then `name`:
+
+      City |> order_by([c], c.name) |> prepend_order_by([c], c.human_population)
+
+  The corresponding keyword-based syntax will raise an error:
+
+      from c in City, order_by: c.name, prepend_order_by: c.human_population
+
+  """
+  defmacro prepend_order_by(query, binding \\ [], expr) do
+    Builder.OrderBy.build(query, binding, expr, :prepend, __CALLER__)
   end
 
   @doc """
@@ -1425,23 +1970,47 @@ defmodule Ecto.Query do
   Combines result sets of multiple queries. The `select` of each query
   must be exactly the same, with the same types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Union expression returns only unique rows as if each query returned
-  distinct results. This may cause performance penalty. If you need
-  just to combine multiple result sets without removing duplicate rows
+  distinct results. This may cause a performance penalty. If you need
+  to combine multiple result sets without removing duplicate rows
   consider using `union_all/2`.
 
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the union.
+  current `query` apply to the result of the union. `order_by` must
+  be specified in one of the following ways, since the union of two
+  or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the union fields.
+    - Wrap the union in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, union: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      union_query = from c in Customer, select: c.city, union: ^supplier_query
+      from s in subquery(union_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> union(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      union(customer_query, ^supplier_query)
 
   """
   defmacro union(query, other_query) do
@@ -1454,18 +2023,42 @@ defmodule Ecto.Query do
   Combines result sets of multiple queries. The `select` of each query
   must be exactly the same, with the same types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the union.
+  current `query` apply to the result of the union. `order_by` must
+  be specified in one of the following ways, since the union of two
+  or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the union fields.
+    - Wrap the union in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, union_all: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      union_all_query = from c in Customer, select: c.city, union_all: ^supplier_query
+      from s in subquery(union_all_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> union_all(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      union_all(customer_query, ^supplier_query)
   """
   defmacro union_all(query, other_query) do
     Builder.Combination.build(:union_all, query, other_query, __CALLER__)
@@ -1478,23 +2071,47 @@ defmodule Ecto.Query do
   `select` of each query must be exactly the same, with the same
   types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Except expression returns only unique rows as if each query returned
-  distinct results. This may cause performance penalty. If you need
-  just to take the difference of multiple result sets without
+  distinct results. This may cause a performance penalty. If you need
+  to take the difference of multiple result sets without
   removing duplicate rows consider using `except_all/2`.
 
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the set difference.
+  current `query` apply to the result of the set difference. `order_by`
+  must be specified in one of the following ways, since the set difference
+  of two or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the set difference fields.
+    - Wrap the set difference in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, except: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      except_query = from c in Customer, select: c.city, except: ^supplier_query
+      from s in subquery(except_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> except(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      except(customer_query, ^supplier_query)
   """
   defmacro except(query, other_query) do
     Builder.Combination.build(:except, query, other_query, __CALLER__)
@@ -1507,18 +2124,42 @@ defmodule Ecto.Query do
   `select` of each query must be exactly the same, with the same
   types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the set difference.
+  current `query` apply to the result of the set difference. `order_by`
+  must be specified in one of the following ways, since the set difference
+  of two or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the set difference fields.
+    - Wrap the set difference in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, except_all: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      except_all_query = from c in Customer, select: c.city, except_all: ^supplier_query
+      from s in subquery(except_all_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> except_all(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      except_all(customer_query, ^supplier_query)
   """
   defmacro except_all(query, other_query) do
     Builder.Combination.build(:except_all, query, other_query, __CALLER__)
@@ -1531,23 +2172,47 @@ defmodule Ecto.Query do
   `select` of each query must be exactly the same, with the same
   types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Intersect expression returns only unique rows as if each query returned
-  distinct results. This may cause performance penalty. If you need
-  just to take the intersection of multiple result sets without
+  distinct results. This may cause a performance penalty. If you need
+  to take the intersection of multiple result sets without
   removing duplicate rows consider using `intersect_all/2`.
 
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the set difference.
+  current `query` apply to the result of the set difference. `order_by`
+  must be specified in one of the following ways, since the intersection
+  of two or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the intersection fields.
+    - Wrap the intersection in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, intersect: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      intersect_query = from c in Customer, select: c.city, intersect: ^supplier_query
+      from s in subquery(intersect_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> intersect(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      intersect(customer_query, ^supplier_query)
   """
   defmacro intersect(query, other_query) do
     Builder.Combination.build(:intersect, query, other_query, __CALLER__)
@@ -1560,18 +2225,42 @@ defmodule Ecto.Query do
   `select` of each query must be exactly the same, with the same
   types in the same order.
 
+  > ### Selecting literal atoms {: .warning}
+  >
+  > When selecting a literal atom, its value must be the same across
+  > all queries. Otherwise, the value from the parent query will be
+  > applied to all other queries. This also holds true for selecting
+  > maps with atom keys.
+
   Note that the operations `order_by`, `limit` and `offset` of the
-  current `query` apply to the result of the set difference.
+  current `query` apply to the result of the set difference. `order_by`
+  must be specified in one of the following ways, since the intersection
+  of two or more queries is not automatically aliased:
 
-  ## Keywords example
+    - Use `Ecto.Query.API.fragment/1` to pass an `order_by` statement that directly access the intersection fields.
+    - Wrap the intersection in a subquery and refer to the binding of the subquery.
 
+  ## Keywords examples
+
+      # Unordered result
       supplier_query = from s in Supplier, select: s.city
       from c in Customer, select: c.city, intersect_all: ^supplier_query
 
-  ## Expressions example
+      # Ordered result
+      supplier_query = from s in Supplier, select: s.city
+      intersect_all_query = from c in Customer, select: c.city, intersect_all: ^supplier_query
+      from s in subquery(intersect_all_query), order_by: s.city
 
+  ## Expressions examples
+
+      # Unordered result
       supplier_query = Supplier |> select([s], s.city)
       Customer |> select([c], c.city) |> intersect_all(^supplier_query)
+
+      # Ordered result
+      customer_query = Customer |> select([c], c.city) |> order_by(fragment("city"))
+      supplier_query = Supplier |> select([s], s.city)
+      intersect_all(customer_query, ^supplier_query)
   """
   defmacro intersect_all(query, other_query) do
     Builder.Combination.build(:intersect_all, query, other_query, __CALLER__)
@@ -1596,6 +2285,34 @@ defmodule Ecto.Query do
   """
   defmacro limit(query, binding \\ [], expr) do
     Builder.LimitOffset.build(:limit, query, binding, expr, __CALLER__)
+  end
+
+  @doc """
+  Enables or disables ties for limit expressions.
+
+  If there are multiple records tied for the last position in an ordered
+  limit result, setting this value to `true` will return all of the tied
+  records, even if the final result exceeds the specified limit.
+
+  Must be a boolean or evaluate to a boolean at runtime. Can only be applied
+  to queries with a `limit` expression or an error is raised. If `limit`
+  is redefined then `with_ties` must be reapplied.
+
+  Not all databases support this option and the ones that do might list it
+  under the `FETCH` command. Databases may require a corresponding `order_by`
+  statement to evaluate ties.
+
+  ## Keywords example
+
+      from(p in Post, where: p.author_id == ^current_user, order_by: [desc: p.visits], limit: 10, with_ties: true)
+
+  ## Expressions example
+
+      Post |> where([p], p.author_id == ^current_user) |> order_by([p], desc: p.visits) |> limit(10) |> with_ties(true)
+
+  """
+  defmacro with_ties(query, binding \\ [], expr) do
+    Builder.LimitOffset.build(:with_ties, query, binding, expr, __CALLER__)
   end
 
   @doc """
@@ -1631,9 +2348,9 @@ defmodule Ecto.Query do
   If `lock` is used more than once, the last one used takes precedence.
 
   Ecto also supports [optimistic
-  locking](http://en.wikipedia.org/wiki/Optimistic_concurrency_control) but not
+  locking](https://en.wikipedia.org/wiki/Optimistic_concurrency_control) but not
   through queries. For more information on optimistic locking, have a look at
-  the `Ecto.Changeset.optimistic_lock/3` function
+  the `Ecto.Changeset.optimistic_lock/3` function.
 
   ## Keywords example
 
@@ -1641,11 +2358,11 @@ defmodule Ecto.Query do
 
   ## Expressions example
 
-      User |> where(u.id == ^current_user) |> lock("FOR SHARE NOWAIT")
+      User |> where([u], u.id == ^current_user) |> lock("FOR SHARE NOWAIT")
 
   """
-  defmacro lock(query, expr) do
-    Builder.Lock.build(query, expr, __CALLER__)
+  defmacro lock(query, binding \\ [], expr) do
+    Builder.Lock.build(query, binding, expr, __CALLER__)
   end
 
   @doc ~S"""
@@ -1658,7 +2375,7 @@ defmodule Ecto.Query do
 
       from(u in User, update: [set: [name: "new name"]])
 
-  ## Expressions example
+  ## Expressions examples
 
       User |> update([u], set: [name: "new name"])
       User |> update(set: [name: "new name"])
@@ -1721,7 +2438,7 @@ defmodule Ecto.Query do
 
       # Using direct fields access
       from(p in Post,
-        join: c in assoc(p, :category)
+        join: c in assoc(p, :category),
         group_by: [p.id, c.name])
 
   ## Expressions example
@@ -1823,6 +2540,32 @@ defmodule Ecto.Query do
                  where: l.inserted_at > c.updated_at,
                  preload: [comments: {c, likes: l}]
 
+  Applying a limit to the association can be achieved with `inner_lateral_join`:
+
+      Repo.all from p in Post, as: :post,
+                 join: c in assoc(p, :comments),
+                 inner_lateral_join: top_five in subquery(
+                   from Comment,
+                   where: [post_id: parent_as(:post).id],
+                   order_by: :popularity,
+                   limit: 5,
+                   select: [:id]
+                 ), on: top_five.id == c.id,
+                 preload: [comments: c]
+
+  Preloaded joins can also be specified dynamically using `dynamic`:
+
+      preloads = [comments: dynamic([comments: c], c)]
+
+      Repo.all from p in Post,
+                 join: c in assoc(p, :comments),
+                 as: :comments,
+                 where: c.published_at > p.updated_at,
+                 preload: ^preloads
+
+  See "`preload`" in the documentation for `dynamic/2` for more
+  details.
+
   ## Preload queries
 
   Preload also allows queries to be given, allowing you to filter or
@@ -1835,6 +2578,24 @@ defmodule Ecto.Query do
   then another for loading the comments associated with the posts.
   Comments will be ordered by `published_at`.
 
+  When specifying a preload query, you can still preload the associations of
+  those records. For instance, you could preload an author's published posts and
+  the comments on those posts:
+
+      posts_query = from p in Post, where: p.state == :published
+      Repo.all from a in Author, preload: [posts: ^{posts_query, [:comments]}]
+
+  If you prefer, you can also add additional preloads directly in the
+  `posts_query`:
+
+      posts_query =
+        from p in Post, where: p.state == :published, preload: :related_posts
+
+  The same can be written as pipe based query:
+
+      posts_query =
+        Post |> where([p], p.state == :published) |> preload(:related_posts)
+
   Note: keep in mind operations like limit and offset in the preload
   query will affect the whole result set and not each association. For
   example, the query below:
@@ -1843,7 +2604,27 @@ defmodule Ecto.Query do
       Repo.all from p in Post, preload: [comments: ^comments_query]
 
   won't bring the top of comments per post. Rather, it will only bring
-  the 5 top comments across all posts.
+  the 5 top comments across all posts. Instead, use a window:
+
+      ranking_query =
+        from c in Comment,
+        select: %{id: c.id, row_number: over(row_number(), :posts_partition)},
+        windows: [posts_partition: [partition_by: :post_id, order_by: :popularity]]
+
+      comments_query =
+        from c in Comment,
+        join: r in subquery(ranking_query),
+        on: c.id == r.id and r.row_number <= 5
+
+      Repo.all from p in Post, preload: [comments: ^comments_query]
+
+  Similarly, if you have a `:through` association, such as posts has many
+  `comments_authors` through comments (`posts->comments->comments_authors`),
+  the query will only customize the relationship between comments and
+  comments_authors, even if preloaded through posts. This means `order_by`
+  clauses on `:through` associations affect only the direct relationship
+  between `comments` and `comments_authors`, not between `posts` and
+  `comments_authors`.
 
   ## Preload functions
 
@@ -1863,27 +2644,26 @@ defmodule Ecto.Query do
       with the associated entries. The associated map/struct must contain
       the "foreign_key" field. For example, if a post has many comments,
       when preloading the comments with a custom function, the function
-      will receive a list of "post_ids" as argument and it must return
+      will receive a list of "post_ids" as the argument and it must return
       maps or structs representing the comments. The maps/structs must
       include the `:post_id` field
 
     * For `has_many :through` - it behaves similarly to a regular `has_many`
-      but note that the IDs received are the ones from the closest
-      parent and not the furthest one. Imagine for example a post has
-      many comments and each comment has an author. Therefore, a post
-      may have many comments_authors, written as
+      but note that the IDs received are of the last association. Imagine,
+      for example, a post has many comments and each comment has an author.
+      Therefore, a post may have many comments_authors, written as
       `has_many :comments_authors, through: [:comments, :author]`. When
       preloading authors with a custom function via `:comments_authors`,
-      the function will receive the IDs of the comments and not of the
-      posts. That's because through associations are still loaded step
-      by step
+      the function will receive the IDs of the authors as the last step
 
-    * For `many_to_many` -  the function receives the IDs of the parent
-      association and it must return a tuple with the parent id as first
-      element and the association map or struct as second. For example,
+    * For `many_to_many` - the function receives the IDs of the parent
+      association and it must return a tuple with the parent id as the first
+      element and the association map or struct as the second. For example,
       if a post has many tags, when preloading the tags with a custom
-      function, the function will receive a list of "post_ids" as argument
+      function, the function will receive a list of "post_ids" as the argument
       and it must return a tuple in the format of `{post_id, tag}`
+
+  If you want to reset the loaded fields, see `Ecto.reset_fields/2`.
 
   ## Keywords example
 
@@ -1891,7 +2671,8 @@ defmodule Ecto.Query do
       # likes for those comments.
       from(p in Post,
         preload: [comments: :likes],
-        select: p)
+        select: p
+      )
 
   ## Expressions examples
 
@@ -1923,13 +2704,16 @@ defmodule Ecto.Query do
 
   def first(%Ecto.Query{} = query, nil) do
     query = %{query | limit: limit()}
+
     case query do
       %{order_bys: []} ->
         %{query | order_bys: [order_by_pk(query, :asc)]}
+
       %{} ->
         query
     end
   end
+
   def first(queryable, nil), do: first(Ecto.Queryable.to_query(queryable), nil)
   def first(queryable, key), do: first(order_by(queryable, ^key), nil)
 
@@ -1951,7 +2735,7 @@ defmodule Ecto.Query do
   def last(queryable, key), do: last(order_by(queryable, ^key), nil)
 
   defp limit do
-    %QueryExpr{expr: 1, params: [], file: __ENV__.file, line: __ENV__.line}
+    %LimitExpr{expr: 1, params: [], file: __ENV__.file, line: __ENV__.line}
   end
 
   defp field(ix, field) when is_integer(ix) and is_atom(field) do
@@ -1960,18 +2744,21 @@ defmodule Ecto.Query do
 
   defp order_by_pk(query, dir) do
     schema = assert_schema!(query)
-    pks    = schema.__schema__(:primary_key)
-    expr   = for pk <- pks, do: {dir, field(0, pk)}
+    pks = schema.__schema__(:primary_key)
+    expr = for pk <- pks, do: {dir, field(0, pk)}
     %QueryExpr{expr: expr, file: __ENV__.file, line: __ENV__.line}
   end
 
-  defp assert_schema!(%{from: %Ecto.Query.FromExpr{source: {_source, schema}}}) when schema != nil, do: schema
+  defp assert_schema!(%{from: %Ecto.Query.FromExpr{source: {_source, schema}}})
+       when schema != nil,
+       do: schema
+
   defp assert_schema!(query) do
     raise Ecto.QueryError, query: query, message: "expected a from expression with a schema"
   end
 
   @doc """
-  Returns `true` if query has binding with a given name, otherwise `false`.
+  Returns `true` if the query has a binding with the given name, otherwise `false`.
 
   For more information on named bindings see "Named bindings" in this module doc.
   """
@@ -1989,15 +2776,85 @@ defmodule Ecto.Query do
   end
 
   @doc """
+  Applies a callback function to a query if it doesn't contain the given named binding.
+  Otherwise, returns the original query.
+
+  The callback function must accept a queryable and return an `Ecto.Query` struct
+  that contains the provided named binding, otherwise an error is raised. It can also
+  accept second argument which is the atom representing the name of a binding.
+
+  For example, one might use this function as a convenience to conditionally add a new
+  named join to a query:
+
+      if has_named_binding?(query, :comments) do
+        query
+      else
+        join(query, :left, [p], c in assoc(p, :comments), as: :comments)
+      end
+
+  With this function it can be simplified to:
+
+      with_named_binding(query, :comments, fn  query, binding ->
+        join(query, :left, [p], a in assoc(p, ^binding), as: ^binding)
+      end)
+
+  For more information on named bindings see "Named bindings" in this module doc or `has_named_binding?/2`.
+  """
+  def with_named_binding(%Ecto.Query{} = query, key, fun) do
+    if has_named_binding?(query, key) do
+      query
+    else
+      query
+      |> apply_binding_callback(fun, key)
+      |> raise_on_invalid_callback_return(key)
+    end
+  end
+
+  def with_named_binding(queryable, key, fun) do
+    queryable
+    |> Ecto.Queryable.to_query()
+    |> with_named_binding(key, fun)
+  end
+
+  defp apply_binding_callback(query, fun, _key) when is_function(fun, 1), do: query |> fun.()
+  defp apply_binding_callback(query, fun, key) when is_function(fun, 2), do: query |> fun.(key)
+
+  defp apply_binding_callback(_query, fun, _key) do
+    raise ArgumentError,
+          "callback function for with_named_binding/3 should accept one or two arguments, got: #{inspect(fun)}"
+  end
+
+  defp raise_on_invalid_callback_return(%Ecto.Query{} = query, key) do
+    if has_named_binding?(query, key) do
+      query
+    else
+      raise RuntimeError,
+            "callback function for with_named_binding/3 should create a named binding for key #{inspect(key)}"
+    end
+  end
+
+  defp raise_on_invalid_callback_return(other, _key) do
+    raise RuntimeError,
+          "callback function for with_named_binding/3 should return an Ecto.Query struct, got: #{inspect(other)}"
+  end
+
+  @doc """
+  The same as `has_named_binding?/2` but allowed in guards.
+  """
+  @doc guard: true
+  defguard is_named_binding(query, name)
+           when is_struct(query, Ecto.Query) and is_map_key(query.aliases, name)
+
+  @doc """
   Reverses the ordering of the query.
 
   ASC columns become DESC columns (and vice-versa). If the query
-  has no order_bys, it orders by the inverse of the primary key.
+  has no `order_by`s, it orders by the inverse of the primary key.
 
   ## Examples
 
-      query |> reverse_order |> Repo.one
-      Post |> order(asc: :id) |> reverse_order == Post |> order(desc: :id)
+      query |> reverse_order() |> Repo.one()
+      Post |> order(asc: :id) |> reverse_order() == Post |> order(desc: :id)
   """
   def reverse_order(%Ecto.Query{} = query) do
     update_in(query.order_bys, fn

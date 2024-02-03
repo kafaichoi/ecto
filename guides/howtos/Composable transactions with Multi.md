@@ -1,6 +1,6 @@
 # Composable transactions with Multi
 
-Ecto relies on database transactions when multiple operations must be performed atomically. The most common example used for transaction are bank transfers between two people:
+Ecto relies on database transactions when multiple operations must be performed atomically. The most common example used for transactions are bank transfers between two people:
 
 ```elixir
 Repo.transaction(fn ->
@@ -9,14 +9,14 @@ Repo.transaction(fn ->
       where: [id: ^mary.id],
       update: [inc: [balance: +10]]
 
-  {1, _} = Repo.update_all(mary_update)
+  {1, _} = Repo.update_all(mary_update, [])
 
   john_update =
     from Account,
       where: [id: ^john.id],
       update: [inc: [balance: -10]]
 
-  {1, _} = Repo.update_all(john_update)
+  {1, _} = Repo.update_all(john_update, [])
 end)
 ```
 
@@ -29,17 +29,18 @@ Repo.transaction(fn ->
       where: [id: ^mary.id],
       update: [inc: [balance: +10]]
 
-  case Repo.update_all query do
+  case Repo.update_all(mary_update, []) do
     {1, _} ->
       john_update =
         from Account,
           where: [id: ^john.id],
           update: [inc: [balance: -10]]
 
-      case Repo.update_all query do
+      case Repo.update_all(john_update, []) do
         {1, _} -> {mary, john}
         {_, _} -> Repo.rollback({:failed_transfer, john})
       end
+
     {_, _} ->
       Repo.rollback({:failed_transfer, mary})
   end
@@ -66,7 +67,7 @@ Repo.transaction(fn ->
 end)
 ```
 
-The snippet above starts a transaction and then calls `transfer_money/3` that also runs in a transaction. In case of multiple transactions, they are all flattened, which means a failure in an inner transaction causes the outer transaction to also fail. That's why matching and rolling back on `{:error, error}` is important.
+The snippet above starts a transaction and then calls `transfer_money/3` that also runs in a transaction. In the case of multiple transactions, they are all flattened, which means a failure in an inner transaction causes the outer transaction to also fail. That's why matching and rolling back on `{:error, error}` is important.
 
 While nesting transactions can improve the code readability by breaking large transactions into multiple smaller transactions, there is still a lot of boilerplate involved in handling the success and failure scenarios. Furthermore, composition is quite limited, as all operations must still be performed inside transaction blocks.
 
@@ -74,7 +75,7 @@ A more declarative approach when working with transactions would be to define al
 
 ## Composing with data structures
 
-Let's rewrite the snippets above using `Ecto.Multi`. The first snippet that transfers money between mary and john can rewritten to:
+Let's rewrite the snippets above using `Ecto.Multi`. The first snippet that transfers money between Mary and John can be rewritten to:
 
 ```elixir
 mary_update =
@@ -88,13 +89,21 @@ john_update =
     update: [inc: [balance: -10]]
 
 Ecto.Multi.new()
-|> Ecto.Multi.update_all(:mary, mary_update)
-|> Ecto.Multi.update_all(:john, john_update)
+|> Ecto.Multi.update_all(:mary, mary_update, [])
+|> Ecto.Multi.run(:check_mary, fn
+  _repo, %{mary: {1, _}} -> {:ok, nil}
+  _repo, %{mary: {_, _}} -> {:error, {:failed_transfer, mary}}
+)
+|> Ecto.Multi.update_all(:john, john_update, [])
+|> Ecto.Multi.run(:check_john, fn
+  _repo, %{john: {1, _}} -> {:ok, nil}
+  _repo, %{john: {_, _}} -> {:error, {:failed_transfer, john}}
+)
 ```
 
-`Ecto.Multi` is a data structure that defines multiple operations that must be performed together, without worrying about when they will be executed. `Ecto.Multi` mirrors most of the `Ecto.Repo` API, with the difference each operation must be explicitly named. In the example above, we have defined two update operations, named `:mary` and `:john`. As we will see later, the names are important when handling the transaction results.
+`Ecto.Multi` is a data structure that defines multiple operations that must be performed together, without worrying about when they will be executed. `Ecto.Multi` mirrors most of the `Ecto.Repo` API, with the difference that each operation must be explicitly named. In the example above, we have defined two update operations, named `:mary` and `:john`, and two validation operations, named `:check_mary` and `:check_john`. As we will see later, the names are important when handling the transaction results.
 
-Since `Ecto.Multi` is just a data structure, we can pass it as argument to other functions, as well as return it. Assuming the multi above is moved into its own function, defined as `transfer_money(mary, john, value)`,  we can add a new operation to the multi that logs the transfer as follows:
+Since `Ecto.Multi` is just a data structure, we can pass it as argument to other functions, as well as return it. Assuming the multi above is moved into its own function, defined as `transfer_money(mary, john, value)`, we can add a new operation to the multi that logs the transfer as follows:
 
 ```elixir
 transfer = %Transfer{
@@ -133,9 +142,9 @@ In other words, `Ecto.Multi` takes care of all the flow control boilerplate whil
 
 ## Dependent values
 
-Besides operations such as `insert`, `update` and `delete`, `Ecto.Multi` also provides functions for handling more complex scenarios. For example, `prepend` and `append` can be used to merge multis together. And more generally, the `Ecto.Multi.run/3` and `Ecto.Multi.run/5` can be used to define any operation that depends on the results of a previous multi operation.
+Besides operations such as `insert`, `update` and `delete`, `Ecto.Multi` also provides functions for handling more complex scenarios. For example, `prepend` and `append` can be used to merge multis together. And more generally, the functions `Ecto.Multi.run/3` and `Ecto.Multi.run/5` can be used to define any operation that depends on the results of a previous multi operation. In addition, `Ecto.Multi` also gives us `put` and `inspect`, which allow us to dynamically update and inspect changes.
 
-Let's study a more practical example. In [Constraints and Upserts](constraints-and-upserts.html), we want to modify a post while possibly giving it a list of tags as a string separated by commas. At the end of the guide, we present a solution that insert any missing tag and then fetch all of them using only two queries:
+Let's study a more practical example. In [Constraints and Upserts](Constraints and Upserts.md), we want to modify a post while possibly giving it a list of tags as a string separated by commas. At the end of the guide, we present a solution that inserts any missing tag and then fetches all of them using only two queries:
 
 ```elixir
 defmodule MyApp.Post do
@@ -170,11 +179,22 @@ defmodule MyApp.Post do
   defp insert_and_get_all([]) do
     []
   end
+
   defp insert_and_get_all(names) do
-    timestamp = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-    maps = Enum.map(names, &%{name: &1, inserted_at: timestamp, updated_at: timestamp})
-    Repo.insert_all MyApp.Tag, maps, on_conflict: :nothing
-    Repo.all from t in MyApp.Tag, where: t.name in ^names
+    timestamp =
+      NaiveDateTime.utc_now()
+      |> NaiveDateTime.truncate(:second)
+
+    maps =
+      Enum.map(names, &%{
+        name: &1,
+        inserted_at: timestamp,
+        updated_at: timestamp
+      })
+
+    Repo.insert_all(MyApp.Tag, maps, on_conflict: :nothing)
+
+    Repo.all(from t in MyApp.Tag, where: t.name in ^names)
   end
 end
 ```
@@ -227,10 +247,10 @@ alias MyApp.Tag
 
 def insert_or_update_post_with_tags(post, params) do
   Ecto.Multi.new()
-  |> Ecto.Multi.run(:tags, fn _, changes ->
+  |> Ecto.Multi.run(:tags, fn _repo, changes ->
     insert_and_get_all_tags(changes, params)
   end)
-  |> Ecto.Multi.run(:post, fn _, changes ->
+  |> Ecto.Multi.run(:post, fn _repo, changes ->
     insert_or_update_post(changes, post, params)
   end)
   |> Repo.transaction()
@@ -240,24 +260,37 @@ defp insert_and_get_all_tags(_changes, params) do
   case MyApp.Tag.parse(params["tags"]) do
     [] ->
       {:ok, []}
+
     names ->
-      timestamp = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-      maps = Enum.map(names, &%{name: &1, inserted_at: timestamp, updated_at: timestamp})
+      timestamp =
+        NaiveDateTime.utc_now()
+        |> NaiveDateTime.truncate(:second)
+
+      maps =
+        Enum.map(names, &%{
+          name: &1,
+          inserted_at: timestamp,
+          updated_at: timestamp
+        })
+
       Repo.insert_all(Tag, maps, on_conflict: :nothing)
+
       query = from t in Tag, where: t.name in ^names
+
       {:ok, Repo.all(query)}
   end
 end
 
 defp insert_or_update_post(%{tags: tags}, post, params) do
-  post = MyApp.Post.changeset(post, tags, params)
-  Repo.insert_or_update post
+  post
+  |> MyApp.Post.changeset(tags, params)
+  |> Repo.insert_or_update()
 end
 ```
 
 In the example above we have used `Ecto.Multi.run/3` twice, albeit for two different reasons.
 
-  1. In `Ecto.Multi.run(:tags, ...)`, we used `run/3` because we need to perform both `insert_all` and `all` operations, and while the multi exposes `Ecto.Multi.insert_all/4`, it does not yet expose a ```Ecto.Multi.all/3```. Whenever we need to perform a repository operation that is not supported by `Ecto.Multi`, we can always fallback to `run/3` or `run/5`.
+  1. In `Ecto.Multi.run(:tags, ...)`, we used `run/3` because we need to perform both `insert_all` and `all` operations, and while the multi exposes `Ecto.Multi.insert_all/4`, it does not have an equivalent to `Ecto.Repo.all`. Whenever we need to perform a repository operation that is not supported by `Ecto.Multi`, we can always fallback to `run/3` or `run/5`.
 
   2. In `Ecto.Multi.run(:post, ...)`, we used `run/3` because we need to access the value of a previous multi operation. The function given to `run/3` receives, as second argument, a map with the results of the operations performed so far. To grab the tags returned in the previous step, we simply pattern match on `%{tags: tags}` on `insert_or_update_post`.
 

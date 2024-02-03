@@ -11,35 +11,40 @@ defmodule Ecto.Query.Builder.Filter do
   It allows query expressions that evaluate to a boolean
   or a keyword list of field names and values. In a keyword
   list multiple key value pairs will be joined with "and".
+
+  Returned is `{expression, {params, %{subqueries: subqueries}}}` which is
+  a valid escaped expression, see `Macro.escape/2`. Both `params`
+  and `subqueries` are reversed.
   """
-  @spec escape(:where | :having, Macro.t, non_neg_integer, Keyword.t, Macro.Env.t) :: {Macro.t, []}
+  @spec escape(:where | :having | :on, Macro.t, non_neg_integer, Keyword.t, Macro.Env.t) :: {Macro.t, {list, Builder.acc()}}
   def escape(_kind, [], _binding, _vars, _env) do
-    {true, []}
+    {true, {[], %{subqueries: []}}}
   end
 
   def escape(kind, expr, binding, vars, env) when is_list(expr) do
-    {parts, params} =
-      Enum.map_reduce(expr, [], fn
-        {field, nil}, _params ->
+    {parts, params_acc} =
+      Enum.map_reduce(expr, {[], %{subqueries: []}}, fn
+        {field, nil}, _params_acc ->
           Builder.error! "nil given for `#{field}`. Comparison with nil is forbidden as it is unsafe. " <>
                          "Instead write a query with is_nil/1, for example: is_nil(s.#{field})"
-        {field, value}, params when is_atom(field) ->
+
+        {field, value}, params_acc when is_atom(field) ->
           value = check_for_nils(value, field)
-          {value, {params, :acc}} = Builder.escape(value, {binding, field}, {params, :acc}, vars, env)
-          {{:{}, [], [:==, [], [to_escaped_field(binding, field), value]]}, params}
-        _, _params ->
+          {value, params_acc} = Builder.escape(value, {binding, field}, params_acc, vars, env)
+          {{:{}, [], [:==, [], [to_escaped_field(binding, field), value]]}, params_acc}
+
+        _, _params_acc ->
           Builder.error! "expected a keyword list at compile time in #{kind}, " <>
                          "got: `#{Macro.to_string expr}`. If you would like to " <>
                          "pass a list dynamically, please interpolate the whole list with ^"
       end)
 
     expr = Enum.reduce parts, &{:{}, [], [:and, [], [&2, &1]]}
-    {expr, params}
+    {expr, params_acc}
   end
 
   def escape(_kind, expr, _binding, vars, env) do
-    {expr, {params, :acc}} = Builder.escape(expr, :boolean, {[], :acc}, vars, env)
-    {expr, params}
+    Builder.escape(expr, :boolean, {[], %{subqueries: []}}, vars, env)
   end
 
   @doc """
@@ -59,13 +64,16 @@ defmodule Ecto.Query.Builder.Filter do
 
   def build(kind, op, query, binding, expr, env) do
     {query, binding} = Builder.escape_binding(query, binding, env)
-    {expr, params} = escape(kind, expr, 0, binding, env)
+    {expr, {params, acc}} = escape(kind, expr, 0, binding, env)
+
     params = Builder.escape_params(params)
+    subqueries = Enum.reverse(acc.subqueries)
 
     expr = quote do: %Ecto.Query.BooleanExpr{
                         expr: unquote(expr),
                         op: unquote(op),
                         params: unquote(params),
+                        subqueries: unquote(subqueries),
                         file: unquote(env.file),
                         line: unquote(env.line)}
     Builder.apply_query(query, __MODULE__, [kind, expr], env)
@@ -90,9 +98,17 @@ defmodule Ecto.Query.Builder.Filter do
 
   @doc """
   Builds a filter based on the given arguments.
+
+  This is shared by having, where and join's on expressions.
   """
-  def filter!(_kind, query, %Ecto.Query.DynamicExpr{} = dynamic, _binding, _file, _line) do
-    {expr, _binding, params, file, line} = Ecto.Query.Builder.Dynamic.fully_expand(query, dynamic)
+  def filter!(kind, query, %Ecto.Query.DynamicExpr{} = dynamic, _binding, _file, _line) do
+    {expr, _binding, params, subqueries, file, line} =
+      Ecto.Query.Builder.Dynamic.fully_expand(query, dynamic)
+
+    if subqueries != [] do
+      raise ArgumentError, "subqueries are not allowed in `#{kind}` expressions"
+    end
+
     {expr, params, file, line}
   end
 
@@ -112,6 +128,22 @@ defmodule Ecto.Query.Builder.Filter do
   @doc """
   Builds the filter and applies it to the given query as boolean operator.
   """
+  def filter!(:where, op, query, %Ecto.Query.DynamicExpr{} = dynamic, _binding, _file, _line) do
+    {expr, _binding, params, subqueries, file, line} =
+      Ecto.Query.Builder.Dynamic.fully_expand(query, dynamic)
+
+    boolean = %Ecto.Query.BooleanExpr{
+      expr: expr,
+      params: params,
+      line: line,
+      file: file,
+      op: op,
+      subqueries: subqueries
+    }
+
+    apply(query, :where, boolean)
+  end
+
   def filter!(kind, op, query, expr, binding, file, line) do
     {expr, params, file, line} = filter!(kind, query, expr, binding, file, line)
     boolean = %Ecto.Query.BooleanExpr{expr: expr, params: params, line: line, file: file, op: op}

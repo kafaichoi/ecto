@@ -2,11 +2,17 @@
 
 With Ecto we can run queries in different prefixes using a single pool of database connections. For databases engines such as Postgres, Ecto's prefix [maps to Postgres' DDL schemas](https://www.postgresql.org/docs/current/static/ddl-schemas.html). For MySQL, each prefix is a different database on its own.
 
-Query prefixes may be useful in different scenarios. For example, multi tenant apps running on Postgres would define multiple prefixes, usually one per client, under a single database. The idea is that prefixes will provide data isolation between the different users of the application, guaranteeing either globally or at the data level that queries and commands act on a specific prefix.
+> #### Multi-tenancy and migrations {: .warning}
+>
+> When working with multi-tenant databases, you need to apply database migrations (such as adding/removing tables, columns, and indexes) to each tenant. If your application grows to dozens of thousands of tenants or more, those migrations can eventually become too expensive and take a long time to complete.
+
+Query prefixes may be useful in different scenarios. For example, multi tenant apps running on PostgreSQL would define multiple prefixes, usually one per client, under a single database. The idea is that prefixes will provide data isolation between the different users of the application, guaranteeing either globally or at the data level that queries and commands act on a specific tenants.
 
 Prefixes may also be useful on high-traffic applications where data is partitioned upfront. For example, a gaming platform may break game data into isolated partitions, each named after a different prefix. A partition for a given player is either chosen at random or calculated based on the player information.
 
-While query prefixes were designed with the two scenarios above in mind, they may also be used in other circumstances, which we will explore throughout this guide. All the examples below assume you are using Postgres. Other databases engines may require slightly different solutions.
+Given each tenant has its own database structure, multi tenancy with query prefixes is expensive to setup. For example, migrations have to run individually for each prefix. Therefore this approach is useful when there is a limited or a slowly growing number of tenants.
+
+Let's get started. Note all the examples below assume you are using PostgreSQL. Other databases engines may require slightly different solutions.
 
 ## Connection prefixes
 
@@ -145,29 +151,29 @@ defmodule MyApp.Mapping do
 end
 ```
 
-Now running `MyApp.Repo.all MyApp.Mapping` will by default run on the "main" prefix, regardless of the value configured for the connection on the `:after_connect` callback. Similar will happen to `insert`, `update`, and similar operations, the `@schema_prefix` is used unless the `:prefix` is explicitly changed via `Ecto.put_meta/2` or by passing the `:prefix` option to the repository operation.
+Now running `MyApp.Repo.all MyApp.Mapping` will by default run on the "main" prefix, regardless of the value configured for the connection on the `:after_connect` callback. However, we may want to override the schema prefix too and Ecto gives us the opportunity to do so, let's see how.
 
 ## Per-query and per-struct prefixes
 
 Now, suppose that while still configured to connect to the "connection_prefix" on `:after_connect`, we run the following queries:
 
 ```iex
-iex(1) alias MyApp.Sample
+iex(1)> alias MyApp.Sample
 MyApp.Sample
-iex(2) MyApp.Repo.all Sample
+iex(2)> MyApp.Repo.all(Sample)
 []
-iex(3) MyApp.Repo.insert %Sample{name: "mary"}
+iex(3)> MyApp.Repo.insert(%Sample{name: "mary"})
 {:ok, %MyApp.Sample{...}}
-iex(4) MyApp.Repo.all Sample
+iex(4)> MyApp.Repo.all(Sample)
 [%MyApp.Sample{...}]
 ```
 
 The operations above ran on the "connection_prefix". So what happens if we try to run the sample query on the "public" prefix? All Ecto repository operations support the `:prefix` option. So let's set it to public.
 
 ```iex
-iex(7)> MyApp.Repo.all Sample
+iex(7)> MyApp.Repo.all(Sample)
 [%MyApp.Sample{...}]
-iex(8)> MyApp.Repo.all Sample, prefix: "public"
+iex(8)> MyApp.Repo.all(Sample, prefix: "public")
 []
 ```
 
@@ -176,7 +182,7 @@ Notice how we were able to change the prefix the query runs on. Back in the defa
 One interesting aspect of prefixes in Ecto is that the prefix information is carried along each struct returned by a query:
 
 ```iex
-iex(9) [sample] = MyApp.Repo.all Sample
+iex(9)> [sample] = MyApp.Repo.all(Sample)
 [%MyApp.Sample{}]
 iex(10)> Ecto.get_meta(sample, :prefix)
 nil
@@ -189,17 +195,21 @@ Since the prefix data is carried in the struct, we can use such to copy data fro
 ```iex
 iex(11)> new_sample = Ecto.put_meta(sample, prefix: "public")
 %MyApp.Sample{}
-iex(12)> MyApp.Repo.insert new_sample
+iex(12)> MyApp.Repo.insert(new_sample)
 {:ok, %MyApp.Sample{}}
-iex(13)> [sample] = MyApp.Repo.all Sample, prefix: "public"
+iex(13)> [sample] = MyApp.Repo.all(Sample, prefix: "public")
 [%MyApp.Sample{}]
 iex(14)> Ecto.get_meta(sample, :prefix)
 "public"
 ```
 
-Now we have data inserted in both prefixes.
+Now we have data inserted in both prefixes. Note how we passed the `:prefix` option to `MyApp.Repo.all`. Almost all Repo operations accept `:prefix` as an option, with one important distinction:
 
-Prefixes in queries and structs always cascade. For example, if you run `MyApp.Repo.preload(post, [:comments])`, the association will be queried for and loaded in the same prefix as the `post` struct. If `post` has associations and you call `MyApp.Repo.insert(post)` or `MyApp.Repo.update(post)`, the associated data will also be inserted/updated in the same prefix as `post`. That's by design to facilitate working with groups of data in the same prefix, and especially because **data in different prefixes must be kept isolated**.
+  * the `:prefix` option in query operations (`all/2`, `update_all/2`, and `delete_all/2`) is a fallback. It will only be used when a `@schema_prefix` or a query prefix was not previously specified
+
+  * the `:prefix` option in schema operations (`insert_all/3`, `insert/2`, `update/2`, etc) will override the `@schema_prefix` as well as any prefix in the struct/changeset
+
+This difference in behaviour is by design: we want to allow flexibility when writing queries but we want to enforce struct/changeset operations to always work isolated within a given prefix. In fact, if call `MyApp.Repo.insert(post)` or `MyApp.Repo.update(post)`, and the post includes associations, the associated data will also be inserted/updated in the same prefix as `post`.
 
 ## Per from/join prefixes
 
@@ -214,7 +224,7 @@ Those will take precedence over all other prefixes we have defined so far. For e
 
   1. If the prefix option is given exclusively to join/from
   2. If the `@schema_prefix` is set in the related schema
-  3. If the `:prefix` field given to the repo operation (i.e. `Repo.all query, prefix: prefix`)
+  3. If the `:prefix` field given to the repo operation (i.e. `Repo.all(query, prefix: prefix)`)
   4. The connection prefix
 
 ## Migration prefixes
@@ -257,11 +267,18 @@ end
 
 ## Summing up
 
-Ecto provides many conveniences for working with querying prefixes. Those conveniences allow developers to configure prefixes with different precedence, starting with the highest one:
+Ecto provides many conveniences for working with querying prefixes. Those conveniences allow developers to configure prefixes with different precedence, starting with the highest one. When executing queries with `all`, `update_all` or `delete_all`, the prefix is computed as follows:
 
   1. from/join prefixes
-  2. query/struct prefixes
+  2. schema prefixes
+  3. the `:prefix` option
+  4. connection prefixes
+
+When working with schemas and changesets in `insert_all`, `insert`, `update`, and so forth, the precedence is:
+
+  1. the `:prefix` option
+  2. changeset prefixes
   3. schema prefixes
   4. connection prefixes
 
-This way developers can tackle different scenarios, from production requirements to multi-tenant applications.
+This way developers can tackle different scenarios from production requirements to multi-tenant applications.

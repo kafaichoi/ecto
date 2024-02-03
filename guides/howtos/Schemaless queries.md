@@ -16,7 +16,7 @@ query =
 MyApp.Repo.all(query)
 ```
 
-Although you might use schemas for most of your queries, Ecto also adds the ability to write regular schemaless queries when prefered.
+Although you might use schemas for most of your queries, Ecto also adds the ability to write regular schemaless queries when preferred.
 
 One example is this ability to select all desired fields without duplication:
 
@@ -35,7 +35,7 @@ def update_title(post, new_title) do
       where: [id: ^post.id],
       update: [set: [title: ^new_title]]
 
-  MyApp.Repo.update_all(query)
+  MyApp.Repo.update_all(query, [])
 end
 ```
 
@@ -55,7 +55,7 @@ def increment_page_views(post) do
       where: [id: ^post.id],
       update: [inc: [page_views: 1]]
 
-  MyApp.Repo.update_all(query)
+  MyApp.Repo.update_all(query, [])
 end
 ```
 
@@ -64,7 +64,7 @@ Let's take a look at another example. Imagine you are writing a reporting view, 
 ```elixir
 import Ecto.Query
 
-def running_activities(start_at, end_at)
+def running_activities(start_at, end_at) do
   query =
     from u in "users",
       join: a in "activities",
@@ -89,11 +89,11 @@ By allowing regular data structures to be given to most query operations, Ecto m
 
 ## insert_all, update_all and delete_all
 
-Ecto allows all database operations to be expressed without a schema. One of the functions provided is `c:Ecto.Repo.insert_all/3`. With `insert_all`, developers can insert multiple entries at once into a repository:
+Ecto allows all database operations to be expressed without a schema. One of the functions provided is `c:Ecto.Repo.insert_all/3`. With `insert_all`, developers can insert multiple entries at once into a repository using the source and a list of fields and values to be passed directly to the adapter:
 
 ```elixir
 MyApp.Repo.insert_all(
-  Post,
+  "posts",
   [
     [title: "hello", body: "world"],
     [title: "another", body: "post"]
@@ -107,7 +107,7 @@ Updates and deletes can also be done without schemas via `c:Ecto.Repo.update_all
 # Use the ID to trigger updates
 post = from p in "posts", where: [id: ^id]
 
-# Update the title for all matchihg posts
+# Update the title for all matching posts
 {1, _} =
   MyApp.Repo.update_all post, set: [title: "new title"]
 

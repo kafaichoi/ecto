@@ -14,6 +14,7 @@ defmodule Mix.Tasks.Ecto.CreateDropTest do
     def loaders(_, _), do: raise "not implemented"
     def init(_), do: raise "not implemented"
     def checkout(_, _, _), do: raise "not implemented"
+    def checked_out?(_), do: raise "not implemented"
     def ensure_all_started(_, _), do: raise "not implemented"
 
     def storage_up(_), do: Process.get(:storage_up) || raise "no storage_up"
@@ -28,6 +29,7 @@ defmodule Mix.Tasks.Ecto.CreateDropTest do
     def loaders(_, _), do: raise "not implemented"
     def init(_), do: raise "not implemented"
     def checkout(_, _, _), do: raise "not implemented"
+    def checked_out?(_), do: raise "not implemented"
     def ensure_all_started(_, _), do: raise "not implemented"
   end
 
@@ -100,8 +102,13 @@ defmodule Mix.Tasks.Ecto.CreateDropTest do
   end
 
   test "raises an error when storage_down gives an unknown feedback" do
-    Process.put(:storage_down, {:error, :confused})
-    assert_raise Mix.Error, fn ->
+    Process.put(:storage_down, {:error, {:error, :confused}})
+    assert_raise Mix.Error, ~r/couldn't be dropped: {:error, :confused}/, fn ->
+      Drop.run ["-r", to_string(Repo)]
+    end
+
+    Process.put(:storage_down, {:error, "unknown"})
+    assert_raise Mix.Error, ~r/couldn't be dropped: unknown/, fn ->
       Drop.run ["-r", to_string(Repo)]
     end
   end

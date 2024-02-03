@@ -7,19 +7,20 @@ defmodule Ecto.Query.Builder.FilterTest do
   import Ecto.Query
 
   describe "escape" do
-    test "handles expressions and params" do
+    test "handles expressions, params" do
       import Kernel, except: [==: 2, and: 2]
 
       assert escape(:where, quote do [] end, 0, [x: 0], __ENV__) ===
-             {true, []}
+             {true, {[], %{subqueries: []}}}
 
       assert escape(:where, quote do {x.x()} == {^"foo"} end, 0, [x: 0], __ENV__) ===
              {Macro.escape(quote do {&0.x()} == {^0} end),
-              [{"foo", {0, :x}}]}
+             {[{"foo", {0, :x}}], %{subqueries: []}}}
 
       escaped = Macro.escape(quote do &0.x() == ^0 and &0.y() == ^1 end)
-      assert {^escaped, [{{_, _, ["bar", :y]}, {0, :y}}, {{_, _, ["foo", :x]}, {0, :x}}]} =
+      assert {^escaped, {params, %{}}} =
               escape(:where, quote do [x: ^"foo", y: ^"bar"] end, 0, [x: 0], __ENV__)
+      assert [{{_, _, ["bar", :y]}, {0, :y}}, {{_, _, ["foo", :x]}, {0, :x}}] = params
     end
 
     test "raises on invalid expressions" do
@@ -39,6 +40,16 @@ defmodule Ecto.Query.Builder.FilterTest do
                    ~r"nil given for `x`. Comparison with nil is forbidden as it is unsafe.", fn ->
         escape(:where, quote do [x: nil] end, 0, [], __ENV__)
       end
+    end
+
+    test "works without Ecto.Query.subquery/1" do
+      import Ecto.Query, except: [subquery: 1]
+
+      s = from(p in "posts", select: 1)
+      %{wheres: [where]} = from(p in "posts", where: exists(s))
+
+      assert Macro.to_string(where.expr) ==
+             "exists({:subquery, 0})"
     end
   end
 
@@ -65,6 +76,55 @@ defmodule Ecto.Query.Builder.FilterTest do
              [{1, {0, :foo}}, {"baz", {0, :bar}}]
     end
 
+    test "in subquery" do
+      s = from(p in "posts", select: p.id, where: p.public == ^true)
+      %{wheres: [where]} = from(p in "posts", where: p.id in subquery(s))
+      assert Macro.to_string(where.expr) ==
+             "&0.id() in {:subquery, 0}"
+      assert where.params ==
+        [{:subquery, 0}]
+    end
+
+    test "supports exists subquery expressions" do
+      s = from(p in "posts", select: 1)
+
+      %{wheres: [where]} = from(p in "posts", where: exists(s))
+
+      assert Macro.to_string(where.expr) ==
+             "exists({:subquery, 0})"
+      assert where.params ==
+             [{:subquery, 0}]
+    end
+
+    test "supports comparison with subqueries with all and any quantifiers" do
+      s = from(p in "posts", select: p.rating, order_by: [desc: p.created_at], limit: 10)
+
+      assert_quantified_subquery = fn %{wheres: [where]}, expected_quantifier ->
+        assert Macro.to_string(where.expr) ==
+               "&0.rating() >= #{expected_quantifier}({:subquery, 0})"
+
+        assert where.params ==
+                [{:subquery, 0}]
+      end
+
+      all_query = from(p in "posts", where: p.rating >= all(s))
+      any_query = from(p in "posts", where: p.rating >= any(s))
+
+      assert_quantified_subquery.(all_query, :all)
+      assert_quantified_subquery.(any_query, :any)
+    end
+
+    test "supports scalar subqueries anywhere in the expression" do
+      s = from(p in "posts", select: avg(p.rating))
+
+      %{wheres: [where]} = from(p in "posts", where: p.rating > subquery(s), select: p.id)
+
+      assert Macro.to_string(where.expr) ==
+             "&0.rating() > {:subquery, 0}"
+      assert where.params ==
+             [{:subquery, 0}]
+    end
+
     test "raises on invalid keywords" do
       assert_raise ArgumentError, fn ->
         where(from(p in "posts"), [p], ^[{1, 2}])
@@ -75,6 +135,15 @@ defmodule Ecto.Query.Builder.FilterTest do
       assert_raise ArgumentError, fn ->
         where(from(p in "posts"), [p], ^[foo: nil])
       end
+    end
+
+    test "raises on nil when a map-value is accessed" do
+      f = fn arg ->
+        from(p in "posts", where: p.foo == ^arg.x and p.bar == ^arg.y)
+      end
+
+      assert_raise ArgumentError, fn -> f.(%{x: nil, y: "y"}) end
+      assert_raise ArgumentError, fn -> f.(%{x: "x", y: nil}) end
     end
   end
 end

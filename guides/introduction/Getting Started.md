@@ -2,7 +2,7 @@
 
 This guide is an introduction to [Ecto](https://github.com/elixir-lang/ecto),
 the database wrapper and query generator for Elixir. Ecto provides a
-standardised API and a set of abstractions for talking to all the different
+standardized API and a set of abstractions for talking to all the different
 kinds of databases, so that Elixir developers can query whatever database
 they're using by employing similar constructs.
 
@@ -20,7 +20,7 @@ To start off with, we'll generate a new Elixir application by running this comma
 mix new friends --sup
 ```
 
-The `--sup` option ensures that this application has [a supervision tree](http://elixir-lang.org/getting-started/mix-otp/supervisor-and-application.html), which we'll need for Ecto a little later on.
+The `--sup` option ensures that this application has [a supervision tree](https://elixir-lang.org/getting-started/mix-otp/supervisor-and-application.html), which we'll need for Ecto a little later on.
 
 To add Ecto to this application, there are a few steps that we need to take. The first step will be adding Ecto and a driver called Postgrex to our `mix.exs` file, which we'll do by changing the `deps` definition in that file to this:
 
@@ -60,7 +60,7 @@ This command will generate the configuration required to connect to a database. 
 
 ```elixir
 config :friends, Friends.Repo,
-  database: "friends_repo",
+  database: "friends",
   username: "user",
   password: "pass",
   hostname: "localhost"
@@ -237,7 +237,7 @@ A successful insertion will return a tuple, like so:
 
 ```elixir
 {:ok,
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: nil,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: nil,
   first_name: nil, id: 1, last_name: nil}}
 ```
 
@@ -293,7 +293,7 @@ Just like the last time we did an insertion, this returns a tuple. This time how
 Then we can get to the errors by doing `changeset.errors`:
 
 ```elixir
-[first_name: "can't be blank", last_name: "can't be blank"]
+[first_name: {"can't be blank", [validation: :required]}, last_name: {"can't be blank", [validation: :required]}]
 ```
 
 And we can ask the changeset itself if it is valid, even before doing an insertion:
@@ -332,7 +332,7 @@ The changeset does not have errors, and is valid. Therefore if we try to insert 
 ```elixir
 Friends.Repo.insert(changeset)
 #=> {:ok,
-     %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: nil,
+     %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: nil,
       first_name: "Ryan", id: 3, last_name: "Bigg"}}
 ```
 
@@ -354,17 +354,17 @@ If the insertion of the changeset succeeds, then you can do whatever you wish wi
 
 
 ```elixir
-[first_name: {"can't be blank", []},
- last_name: {"can't be blank", []}]
+[first_name: {"can't be blank", [validation: :required]},
+ last_name: {"can't be blank", [validation: :required]}]
 ```
 
-The first element of the tuple is the validation message, and the second element is a keyword list of options for the validation message. The `validate_required/3` validations don't return any options, but other methods such as `validate_length/3` do. Imagine that we had a field called `bio` that we were validating, and that field has to be longer than 15 characters. This is what would be returned:
+The first element of the tuple is the validation message, and the second element is a keyword list of options for the validation message. Imagine that we had a field called `bio` that we were validating, and that field has to be longer than 15 characters. This is what would be returned:
 
 
 ```elixir
-[first_name: {"can't be blank", []},
- last_name: {"can't be blank", []},
- bio: {"should be at least %{count} characters", [count: 15]}]
+[first_name: {"can't be blank", [validation: :required]},
+ last_name: {"can't be blank", [validation: :required]},
+ bio: {"should be at least %{count} character(s)", [count: 15, validation: :length, kind: :min, type: :string]}]
 ```
 
 To display these error messages in a human friendly way, we can use `Ecto.Changeset.traverse_errors/2`:
@@ -383,7 +383,7 @@ This will return the following for the errors shown above:
 %{
   first_name: ["can't be blank"],
   last_name: ["can't be blank"],
-  bio: ["should be at least 15 characters"],
+  bio: ["should be at least 15 character(s)"],
 }
 ```
 
@@ -394,19 +394,29 @@ Friends.Repo.insert! Friends.Person.changeset(%Friends.Person{}, %{first_name: "
 
 ** (Ecto.InvalidChangesetError) could not perform insert because changeset is invalid.
 
-* Changeset changes
+Errors
 
-%{first_name: "Ryan"}
+    %{last_name: [{"can't be blank", [validation: :required]}]}
 
-* Changeset params
+Applied changes
 
-%{"first_name" => "Ryan"}
+    %{first_name: "Ryan"}
 
-* Changeset errors
+Params
 
-[last_name: "can't be blank"]
+    %{"first_name" => "Ryan"}
 
-    lib/ecto/repo/schema.ex:111: Ecto.Repo.Schema.insert!/4
+Changeset
+
+    #Ecto.Changeset<
+      action: :insert,
+      changes: %{first_name: "Ryan"},
+      errors: [last_name: {"can't be blank", [validation: :required]}],
+      data: #Friends.Person<>,
+      valid?: false
+    >
+
+   (ecto) lib/ecto/repo/schema.ex:257: Ecto.Repo.Schema.insert!/4
 ```
 
 This exception shows us the changes from the changeset, and how the changeset is invalid. This can be useful if you want to insert a bunch of data and then have an exception raised if that data is not inserted correctly at all.
@@ -450,7 +460,7 @@ Friends.Person |> Ecto.Query.first
 That code will generate an `Ecto.Query`, which will be this:
 
 ```
-#Ecto.Query<from p in Friends.Person, order_by: [asc: p.id], limit: 1>
+#Ecto.Query<from p0 in Friends.Person, order_by: [asc: p0.id], limit: 1>
 ```
 
 The code between the angle brackets `<...>` here shows the Ecto query which has been constructed. We could construct this query ourselves with almost exactly the same syntax:
@@ -471,7 +481,7 @@ Friends.Person |> Ecto.Query.first |> Friends.Repo.one
 The `one` function retrieves just one record from our database and returns a new struct from the `Friends.Person` module:
 
 ```elixir
-%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 28,
+%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 28,
  first_name: "Ryan", id: 1, last_name: "Bigg"}
 ```
 
@@ -479,7 +489,7 @@ Similar to `first`, there is also `last`:
 
 ```elixir
 Friends.Person |> Ecto.Query.last |> Friends.Repo.one
-#=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 26,
+#=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 26,
      first_name: "Jane", id: 3, last_name: "Smith"}
  ```
 
@@ -525,11 +535,11 @@ Friends.Person |> Friends.Repo.all
 This will return a `Friends.Person` struct representation of all the records that currently exist within our `people` table:
 
 ```elixir
-[%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 28,
+[%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 28,
   first_name: "Ryan", id: 1, last_name: "Bigg"},
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 27,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 27,
   first_name: "John", id: 2, last_name: "Smith"},
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 26,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 26,
   first_name: "Jane", id: 3, last_name: "Smith"}]
 ```
 
@@ -539,7 +549,7 @@ To fetch a record based on its ID, you use the `get` function:
 
 ```elixir
 Friends.Person |> Friends.Repo.get(1)
-#=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 28,
+#=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 28,
      first_name: "Ryan", id: 1, last_name: "Bigg"}
 ```
 
@@ -549,7 +559,7 @@ If we want to get a record based on something other than the `id` attribute, we 
 
 ```elixir
  Friends.Person |> Friends.Repo.get_by(first_name: "Ryan")
- #=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 28,
+ #=> %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 28,
       first_name: "Ryan", id: 1, last_name: "Bigg"}
 ```
 
@@ -562,9 +572,9 @@ Friends.Person |> Ecto.Query.where(last_name: "Smith") |> Friends.Repo.all
 ```
 
 ```elixir
-[%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 27,
+[%Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 27,
   first_name: "John", id: 2, last_name: "Smith"},
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 26,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 26,
   first_name: "Jane", id: 3, last_name: "Smith"}]
 ```
 
@@ -588,12 +598,11 @@ Friends.Person |> Ecto.Query.where(last_name: last_name) |> Friends.Repo.all
 ```
 
 ```
-** (Ecto.Query.CompileError) variable `last_name` is not a valid query expression.
-  Variables need to be explicitly interpolated in queries with ^
-             expanding macro: Ecto.Query.where/2
-             iex:1: (file)
+** (Ecto.Query.CompileError) unbound variable `last_name` in query. If you are attempting to interpolate a value, use ^var
+    (ecto)   expanding macro: Ecto.Query.where/2
+             iex:15: (file)
     (elixir) expanding macro: Kernel.|>/2
-             iex:1: (file)
+             iex:15: (file)
 ```
 
 The same will happen in the longer query syntax too:
@@ -603,14 +612,13 @@ Ecto.Query.from(p in Friends.Person, where: p.last_name == last_name) |> Friends
 ```
 
 ```
-** (Ecto.Query.CompileError) variable `last_name` is not a valid query expression.
-  Variables need to be explicitly interpolated in queries with ^
-             expanding macro: Ecto.Query.where/3
-             iex:1: (file)
-             expanding macro: Ecto.Query.from/2
-             iex:1: (file)
+** (Ecto.Query.CompileError) unbound variable `last_name` in query. If you are attempting to interpolate a value, use ^var
+    (ecto)   expanding macro: Ecto.Query.where/3
+             iex:15: (file)
+    (ecto)   expanding macro: Ecto.Query.from/2
+             iex:15: (file)
     (elixir) expanding macro: Kernel.|>/2
-             iex:1: (file)
+             iex:15: (file)
 ```
 
 To get around this, we use the pin operator (`^`):
@@ -627,7 +635,7 @@ last_name = "Smith"
 Ecto.Query.from(p in Friends.Person, where: p.last_name == ^last_name) |> Friends.Repo.all
 ```
 
-The pin operator instructs the query builder to use parameterised SQL queries protecting against SQL injection.
+The pin operator instructs the query builder to use parameterized SQL queries protecting against SQL injection.
 
 ### Composing Ecto queries
 
@@ -678,7 +686,7 @@ Just like `Friends.Repo.insert`, `Friends.Repo.update` will return a tuple:
 
 ```elixir
 {:ok,
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded>, age: 29,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:loaded, "people">, age: 29,
   first_name: "Ryan", id: 1, last_name: "Bigg"}}
 ```
 
@@ -688,9 +696,13 @@ If the changeset fails for any reason, the result of `Friends.Repo.update` will 
 changeset = Friends.Person.changeset(person, %{first_name: ""})
 Friends.Repo.update(changeset)
 #=> {:error,
-     #Ecto.Changeset<action: :update, changes: %{first_name: ""},
-      errors: [first_name: "can't be blank"], data: #Friends.Person<>,
-      valid?: false>}
+     #Ecto.Changeset<
+       action: :update, 
+       changes: %{},
+       errors: [first_name: {"can't be blank", [validation: :required]}], 
+       data: #Friends.Person<>,
+       valid?: false
+     >}
 ```
 
 This means that you can also use a `case` statement to do different things depending on the outcome of the `update` function:
@@ -712,19 +724,29 @@ Friends.Repo.update! changeset
 
 ** (Ecto.InvalidChangesetError) could not perform update because changeset is invalid.
 
-* Changeset changes
+Errors
 
-%{first_name: ""}
+  %{first_name: [{"can't be blank", [validation: :required]}]}
 
-* Changeset params
+Applied changes
 
-%{"first_name" => ""}
+  %{}
 
-* Changeset errors
+Params
 
-[first_name: {"can't be blank", []}]
+  %{"first_name" => ""}
 
-    lib/ecto/repo/schema.ex:132: Ecto.Repo.Schema.update!/4
+Changeset
+
+    #Ecto.Changeset<
+      action: :update,
+      changes: %{},
+      errors: [first_name: {"can't be blank", [validation: :required]}],
+      data: #Friends.Person<>,
+      valid?: false
+    >
+
+    (ecto) lib/ecto/repo/schema.ex:270: Ecto.Repo.Schema.update!/4
 ```
 
 ## Deleting records
@@ -737,7 +759,7 @@ Similar to updating, we must first fetch a record from the database and then cal
 person = Friends.Repo.get(Friends.Person, 1)
 Friends.Repo.delete(person)
 #=> {:ok,
- %Friends.Person{__meta__: #Ecto.Schema.Metadata<:deleted>, age: 29,
+ %Friends.Person{__meta__: #Ecto.Schema.Metadata<:deleted, "people">, age: 29,
   first_name: "Ryan", id: 2, last_name: "Bigg"}}
 ```
 

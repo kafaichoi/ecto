@@ -1,13 +1,7 @@
 Code.require_file "../support/eval_helpers.exs", __DIR__
 
-defmodule Ecto.QueryTest do
-  use ExUnit.Case, async: true
-
-  import Support.EvalHelpers
-  import Ecto.Query
-  alias Ecto.Query
-
-  defmacrop macro_equal(column, value) do
+defmodule Ecto.QueryTest.Macros do
+  defmacro macro_equal(column, value) do
     quote do
       unquote(column) == unquote(value)
     end
@@ -20,9 +14,30 @@ defmodule Ecto.QueryTest do
     end
   end
 
+  defmacro macrotest(x), do: quote(do: is_nil(unquote(x)) or unquote(x) == "A")
+  defmacro deeper_macrotest(x), do: quote(do: macrotest(unquote(x)) or unquote(x) == "B")
+end
+
+defmodule Ecto.QueryTest do
+  use ExUnit.Case, async: true
+
+  import Support.EvalHelpers
+  import Ecto.Query
+  import Ecto.QueryTest.Macros
+  require Ecto.QueryTest.Macros, as: Macros
+  alias Ecto.Query
+
+  defmodule Schema do
+    use Ecto.Schema
+    schema "schema" do
+    end
+  end
+
   describe "query building" do
     test "allows macros" do
       test_data = "test"
+      query = from(p in "posts") |> where([q], Macros.macro_equal(q.title, ^test_data))
+      assert "&0.title() == ^0" == Macro.to_string(hd(query.wheres).expr)
       query = from(p in "posts") |> where([q], macro_equal(q.title, ^test_data))
       assert "&0.title() == ^0" == Macro.to_string(hd(query.wheres).expr)
     end
@@ -32,10 +47,10 @@ defmodule Ecto.QueryTest do
       from(p in "posts", select: [macro_map(^key)])
     end
 
-    defmacrop macrotest(x), do: quote(do: is_nil(unquote(x)) or unquote(x) == "A")
-    defmacrop deeper_macrotest(x), do: quote(do: macrotest(unquote(x)) or unquote(x) == "B")
     test "allows macro in where" do
+      _ = from(p in "posts", where: p.title == "C" or Macros.macrotest(p.title))
       _ = from(p in "posts", where: p.title == "C" or macrotest(p.title))
+      _ = from(p in "posts", where: p.title == "C" or Macros.deeper_macrotest(p.title))
       _ = from(p in "posts", where: p.title == "C" or deeper_macrotest(p.title))
     end
 
@@ -52,6 +67,22 @@ defmodule Ecto.QueryTest do
         id = nil
         from p in "posts", where: [id: ^id]
       end
+    end
+
+    test "allows arbitrary parentheses in where" do
+      _ = from(p in "posts", where: (not is_nil(p.title)))
+    end
+
+    @statuses [:draft, :published]
+
+    test "allows module attributes with in" do
+      expected_in = [
+        %Ecto.Query.Tagged{value: :draft, type: {0, :status}},
+        %Ecto.Query.Tagged{value: :published, type: {0, :status}}
+      ]
+
+      [%{expr: {:in, [], [_, actual_in]}}] = from(p in "posts", where: p.status in @statuses).wheres
+      assert actual_in == expected_in
     end
   end
 
@@ -99,26 +130,6 @@ defmodule Ecto.QueryTest do
       assert subquery("posts", prefix: "my_prefix").query.prefix == "my_prefix"
       assert subquery(subquery("posts", prefix: "my_prefix")).query.prefix == "my_prefix"
       assert subquery(subquery("posts", prefix: "my_prefix").query).query.prefix == "my_prefix"
-    end
-  end
-
-  describe "common table expressions" do
-    test "recursive CTE" do
-      initial = "categories" |> where([c], is_nil(c.parent_id))
-      recursion = "categories" |> join(:inner, [c], ct in "tree", on: c.parent_id == ct.id)
-      tree = initial |> union_all(^recursion)
-      query = "products" |> recursive_ctes(true) |> with_cte("tree", as: ^tree)
-
-      assert [{"tree", ^tree}] = query.with_ctes.queries
-      assert query.with_ctes.recursive
-    end
-
-    test "fragment CTE" do
-      query = "products" |> with_cte("categories", as: fragment("SELECT * FROM categories"))
-
-      assert [{"categories", %Ecto.Query.QueryExpr{expr: expr}}] = query.with_ctes.queries
-      assert {:fragment, [], [raw: "SELECT * FROM categories"]} = expr
-      refute query.with_ctes.recursive
     end
   end
 
@@ -174,7 +185,10 @@ defmodule Ecto.QueryTest do
       _ = from(p in "posts") |> select([:title])
       _ = from(p in "posts") |> group_by([:title])
       _ = from(p in "posts") |> distinct(true)
-      _ = from(p in "posts") |> join(:inner, "comments")
+
+      assert ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        _ = quote_and_eval(from(p in "posts") |> join(:inner, "comments"))
+      end) =~ ~s'missing `:on` in join on "comments", defaulting to `on: true`'
     end
 
     test "must be a list of variables" do
@@ -190,13 +204,13 @@ defmodule Ecto.QueryTest do
       end
 
       "posts" |> select([_], 0)
-      "posts" |> join(:inner, [], "comments") |> select([_, c], c.text)
-      "posts" |> join(:inner, [], "comments") |> select([p, _], p.title)
-      "posts" |> join(:inner, [], "comments") |> select([_, _], 0)
+      "posts" |> join(:inner, [], "comments", on: true) |> select([_, c], c.text)
+      "posts" |> join(:inner, [], "comments", on: true) |> select([p, _], p.title)
+      "posts" |> join(:inner, [], "comments", on: true) |> select([_, _], 0)
     end
 
     test "can be added through joins" do
-      from(c in "comments", join: p in "posts", select: {p.title, c.text})
+      from(c in "comments", join: p in "posts", on: true, select: {p.title, c.text})
       "comments" |> join(:inner, [c], p in "posts", on: true) |> select([c, p], {p.title, c.text})
     end
 
@@ -223,9 +237,16 @@ defmodule Ecto.QueryTest do
     end
   end
 
+  describe "put_query_prefix" do
+    test "stores prefix in query" do
+      assert put_query_prefix(from("posts"), "hello").prefix == "hello"
+      assert put_query_prefix(Schema, "hello").prefix == "hello"
+    end
+  end
+
   describe "trailing bindings (...)" do
     test "match on last bindings" do
-      query = "posts" |> join(:inner, [], "comments") |> join(:inner, [], "votes")
+      query = "posts" |> join(:inner, [], "comments", on: true) |> join(:inner, [], "votes", on: true)
       assert select(query, [..., v], v).select.expr ==
              {:&, [], [2]}
 
@@ -242,9 +263,9 @@ defmodule Ecto.QueryTest do
     test "match on last bindings with multiple constructs" do
       query =
         "posts"
-        |> join(:inner, [], "comments")
+        |> join(:inner, [], "comments", on: true)
         |> where([..., c], c.public)
-        |> join(:inner, [], "votes")
+        |> join(:inner, [], "votes", on: true)
         |> select([..., v], v)
 
       assert query.select.expr == {:&, [], [2]}
@@ -254,7 +275,7 @@ defmodule Ecto.QueryTest do
     test "match on last bindings inside joins" do
       query =
         "posts"
-        |> join(:inner, [], "comments")
+        |> join(:inner, [], "comments", on: true)
         |> join(:inner, [..., c], v in "votes", on: c.id == v.id)
 
       assert hd(tl(query.joins)).on.expr ==
@@ -287,8 +308,8 @@ defmodule Ecto.QueryTest do
     test "assigns a name to a join" do
       query =
         from(p in "posts",
-          join: b in "blogs",
-          join: c in "comments", as: :comment,
+          join: b in "blogs", on: true,
+          join: c in "comments", on: true, as: :comment,
           join: l in "links", on: l.valid, as: :link)
 
       assert %{comment: 2, link: 3} == query.aliases
@@ -309,6 +330,12 @@ defmodule Ecto.QueryTest do
       assert %{as: :post} = query.from
     end
 
+    test "assigns a name using a variable" do
+      binding = :post
+      query = from p in "posts", as: ^binding
+      assert %{as: :post} = query.from
+    end
+
     test "assigns a name to a subquery source" do
       posts_query = from p in "posts"
       query = from p in subquery(posts_query), as: :post
@@ -318,7 +345,7 @@ defmodule Ecto.QueryTest do
     end
 
     test "assign to source fails when non-atom name passed" do
-      message = ~r"`as` must be a compile time atom, got: `\"post\"`"
+      message = ~r/`as` must be a compile time atom or an interpolated value using \^, got: "post"/
       assert_raise Ecto.Query.CompileError, message, fn ->
         quote_and_eval(from(p in "posts", as: "post"))
       end
@@ -333,14 +360,16 @@ defmodule Ecto.QueryTest do
     test "crashes on duplicate as for keyword query" do
       message = ~r"`as` keyword was given more than once"
       assert_raise Ecto.Query.CompileError, message, fn ->
-        quote_and_eval(from(p in "posts", join: b in "blogs", as: :foo, as: :bar))
+        quote_and_eval(from(p in "posts", join: b in "blogs", on: true, as: :foo, as: :bar))
       end
     end
 
     test "crashes on assigning the same name twice at compile time" do
       message = ~r"alias `:foo` already exists"
       assert_raise Ecto.Query.CompileError, message, fn ->
-        quote_and_eval(from(p in "posts", join: b in "blogs", as: :foo, join: c in "comments", as: :foo))
+        quote_and_eval(
+          from(p in "posts", join: b in "blogs", on: true, as: :foo, join: c in "comments", on: true, as: :foo)
+        )
       end
     end
 
@@ -348,14 +377,14 @@ defmodule Ecto.QueryTest do
       message = ~r"alias `:foo` already exists"
       assert_raise Ecto.Query.CompileError, message, fn ->
         query = "posts"
-        from(p in query, join: b in "blogs", as: :foo, join: c in "comments", as: :foo)
+        from(p in query, join: b in "blogs", on: true, as: :foo, join: c in "comments", on: true, as: :foo)
       end
     end
 
     test "crashes on assigning the same name twice when aliasing source" do
       message = ~r"alias `:foo` already exists"
       assert_raise Ecto.Query.CompileError, message, fn ->
-        query = from p in "posts", join: b in "blogs", as: :foo
+        query = from p in "posts", join: b in "blogs", on: true, as: :foo
         from(p in query, as: :foo)
       end
     end
@@ -371,7 +400,7 @@ defmodule Ecto.QueryTest do
     test "match on binding by name" do
       query =
         "posts"
-        |> join(:inner, [p], c in "comments", as: :comment)
+        |> join(:inner, [p], c in "comments", on: true, as: :comment)
         |> where([comment: c], c.id == 0)
 
       assert inspect(query) ==
@@ -391,18 +420,18 @@ defmodule Ecto.QueryTest do
       query =
         "posts"
         |> from(as: :post)
-        |> join(:inner, [post: p], "comments", as: :comment)
+        |> join(:inner, [post: p], c in "comments", as: :comment, on: p.id == c.post_id)
         |> update([comment: c], set: [id: c.id + 1])
 
       assert inspect(query) ==
-        ~s{#Ecto.Query<from p0 in "posts", as: :post, join: c1 in "comments", as: :comment, on: true, update: [set: [id: c1.id + 1]]>}
+        ~s{#Ecto.Query<from p0 in "posts", as: :post, join: c1 in "comments", as: :comment, on: p0.id == c1.post_id, update: [set: [id: c1.id + 1]]>}
     end
 
     test "match on binding by name with ... in the middle" do
       query =
         "posts"
-        |> join(:inner, [p], c in "comments")
-        |> join(:inner, [], a in "authors", as: :authors)
+        |> join(:inner, [p], c in "comments", on: true)
+        |> join(:inner, [], a in "authors", on: true, as: :authors)
         |> where([p, ..., authors: a], a.id == 0)
 
       assert inspect(query) ==
@@ -412,7 +441,7 @@ defmodule Ecto.QueryTest do
     test "crashes on non-existing binding" do
       assert_raise Ecto.QueryError, ~r"unknown bind name `:nope`", fn ->
         "posts"
-        |> join(:inner, [p], c in "comments", as: :comment)
+        |> join(:inner, [p], c in "comments", on: true, as: :comment)
         |> where([nope: c], c.id == 0)
       end
     end
@@ -422,7 +451,7 @@ defmodule Ecto.QueryTest do
       assert_raise Ecto.Query.CompileError, message, fn ->
       quote_and_eval(
         "posts"
-        |> join(:inner, [p], c in "comments", as: :comment)
+        |> join(:inner, [p], c in "comments", on: true, as: :comment)
         |> where([{:comment, c}, p], c.id == 0)
       )
       end
@@ -433,7 +462,7 @@ defmodule Ecto.QueryTest do
 
       query =
         "posts"
-        |> join(:inner, [p], c in "comments", as: :comment)
+        |> join(:inner, [p], c in "comments", on: true, as: :comment)
         |> where([{^assoc, c}], c.id == 0)
 
       assert inspect(query) ==
@@ -450,10 +479,48 @@ defmodule Ecto.QueryTest do
   end
 
   describe "prefixes" do
+    defmodule Post do
+      use Ecto.Schema
+      @schema_prefix "another"
+      schema "posts" do
+      end
+    end
+
     test "are supported on from and join" do
-      query = from "posts", prefix: "hello", join: "comments", prefix: "world"
+      query = from "posts", prefix: "hello", join: "comments", on: true, prefix: "world"
       assert query.from.prefix == "hello"
       assert hd(query.joins).prefix == "world"
+    end
+
+    test "are assigned from a variable" do
+      from_prefix = "hello"
+      join_prefix = "world"
+      query = from p in "posts", prefix: ^from_prefix, join: "comments", on: true, prefix: ^join_prefix
+      assert query.from.prefix == from_prefix
+      assert hd(query.joins).prefix == join_prefix
+    end
+
+    test "variables are validated at runtime" do
+      prefix = 123
+
+      assert_raise RuntimeError, ~r/`prefix` must be a string/, fn ->
+        from p in "posts", prefix: ^prefix
+      end
+
+      assert_raise RuntimeError, ~r/`prefix` must be a string/, fn ->
+        from p in "posts", join: "comments", on: true, prefix: ^prefix
+      end
+    end
+
+    test "are supported and overridden from schemas" do
+      query = from(Post)
+      assert query.from.prefix == "another"
+
+      query = from(Post, prefix: "hello")
+      assert query.from.prefix == "hello"
+
+      query = from(Post, prefix: nil)
+      assert query.from.prefix == nil
     end
 
     test "are supported on dynamic from" do
@@ -477,14 +544,14 @@ defmodule Ecto.QueryTest do
       end
 
       assert_raise Ecto.Query.CompileError, ~r"`prefix` must be a compile time string", fn ->
-        quote_and_eval(from "posts", join: "comments", prefix: 123)
+        quote_and_eval(from "posts", join: "comments", on: true, prefix: 123)
       end
     end
   end
 
   describe "hints" do
     test "are supported on from and join" do
-      query = from "posts", hints: "hello", join: "comments", hints: ["world", "extra"]
+      query = from "posts", hints: "hello", join: "comments", on: true, hints: ["world", "extra"]
       assert query.from.hints == ["hello"]
       assert hd(query.joins).hints == ["world", "extra"]
     end
@@ -499,32 +566,50 @@ defmodule Ecto.QueryTest do
       assert query.from.hints == ["hello", "world"]
     end
 
-    test "are expected to be compile-time strings or list of strings" do
+    test "supports interpolation through unsafe_fragment" do
+      hint = "fragment"
+      query = from "posts", hints: unsafe_fragment(^hint)
+      assert query.from.hints == ["fragment"]
+
+      hint = "hint"
+      query = from "posts", hints: ["string", unsafe_fragment(^hint)]
+      assert query.from.hints == ["string", "hint"]
+    end
+
+    test "are expected to be strings or unsafe fragments that evaluate to strings" do
       assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
         quote_and_eval(from "posts", hints: 123)
       end
 
       assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
-        quote_and_eval(from "posts", join: "comments", hints: 123)
+        quote_and_eval(from "posts", hints: ["string", :atom])
+      end
+
+      assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
+        quote_and_eval(from "posts", hints: unsafe_fragment(^123))
+      end
+
+      msg = ~r"`unsafe_fragment/1` in `hints` expects an interpolated value"
+
+      assert_raise Ecto.Query.CompileError, msg, fn ->
+        quote_and_eval(from "posts", hints: ["string", unsafe_fragment("123")])
       end
     end
   end
 
   describe "keyword queries" do
     test "are supported through from/2" do
-      # queries need to be on the same line or == wont work
+      # queries need to be on the same line or == won't work
       assert from(p in "posts", select: 1 < 2) == from(p in "posts", []) |> select([p], 1 < 2)
       assert from(p in "posts", where: 1 < 2)  == from(p in "posts", []) |> where([p], 1 < 2)
-
-      query = "posts"
-      assert (query |> select([p], p.title)) == from(p in query, select: p.title)
+      assert (from(p in "posts") |> select([p], p.title)) == from(p in "posts", select: p.title)
     end
 
     test "are built at compile time with binaries" do
       quoted =
         quote do
           from(p in "posts",
-               join: b in "blogs",
+               join: b in "blogs", on: true,
                join: c in "comments", on: c.text == "",
                limit: 0,
                where: p.id == 0 and b.id == 0 and c.id == 0,
@@ -539,7 +624,7 @@ defmodule Ecto.QueryTest do
       quoted =
         quote do
           from(p in Post,
-               join: b in Blog,
+               join: b in Blog, on: true,
                join: c in Comment, on: c.text == "",
                limit: 0,
                where: p.id == 0 and b.id == 0 and c.id == 0,
@@ -567,8 +652,8 @@ defmodule Ecto.QueryTest do
 
       query =
         from(p in "posts",
-          join: b in "blogs",
-          join: c in "comments",
+          join: b in "blogs", on: true,
+          join: c in "comments", on: true,
           where: p.id == 0 and b.id == 0,
           or_where: c.id == 0,
           order_by: p.title,
@@ -582,6 +667,7 @@ defmodule Ecto.QueryTest do
           having: p.comments > 10,
           distinct: p.category,
           lock: "FOO",
+          update: [set: [title: "foo"]],
           select: p
         )
 
@@ -600,6 +686,7 @@ defmodule Ecto.QueryTest do
       refute query.limit == base.limit
       refute query.offset == base.offset
       refute query.lock == base.lock
+      refute query.updates == base.updates
 
       excluded_query =
         query
@@ -615,6 +702,7 @@ defmodule Ecto.QueryTest do
         |> exclude(:limit)
         |> exclude(:offset)
         |> exclude(:lock)
+        |> exclude(:update)
 
       # Post-exclusion assertions
       assert excluded_query.with_ctes == base.with_ctes
@@ -629,6 +717,7 @@ defmodule Ecto.QueryTest do
       assert excluded_query.limit == base.limit
       assert excluded_query.offset == base.offset
       assert excluded_query.lock == base.lock
+      assert excluded_query.updates == base.updates
     end
 
     test "works on any queryable" do
@@ -672,27 +761,36 @@ defmodule Ecto.QueryTest do
     test "removes join qualifiers" do
       base = %Ecto.Query{}
 
-      inner_query         = from p in "posts", inner_join: b in "blogs"
+      inner_query         = from p in "posts", inner_join: b in "blogs", on: true
       cross_query         = from p in "posts", cross_join: b in "blogs"
-      left_query          = from p in "posts", left_join: b in "blogs"
-      right_query         = from p in "posts", right_join: b in "blogs"
-      full_query          = from p in "posts", full_join: b in "blogs"
-      inner_lateral_query = from p in "posts", inner_lateral_join: b in "blogs"
-      left_lateral_query  = from p in "posts", left_lateral_join: b in "blogs"
+      cross_lateral_query = from p in "posts", cross_lateral_join: b in "blogs"
+      left_query          = from p in "posts", left_join: b in "blogs", on: true
+      right_query         = from p in "posts", right_join: b in "blogs", on: true
+      full_query          = from p in "posts", full_join: b in "blogs", on: true
+      inner_lateral_query = from p in "posts", inner_lateral_join: b in "blogs", on: true
+      left_lateral_query  = from p in "posts", left_lateral_join: b in "blogs", on: true
+      array_query         = from p in "posts", array_join: b in "blogs"
+      left_array_query    = from p in "posts", left_array_join: b in "blogs"
 
       refute inner_query.joins == base.joins
       refute cross_query.joins == base.joins
+      refute cross_lateral_query.joins == base.joins
       refute left_query.joins == base.joins
       refute right_query.joins == base.joins
       refute full_query.joins == base.joins
       refute inner_lateral_query.joins == base.joins
       refute left_lateral_query.joins == base.joins
+      refute array_query.joins == base.joins
+      refute left_array_query.joins == base.joins
 
       excluded_inner_query = exclude(inner_query, :inner_join)
       assert excluded_inner_query.joins == base.joins
 
       excluded_cross_query = exclude(cross_query, :cross_join)
       assert excluded_cross_query.joins == base.joins
+
+      excluded_cross_lateral_query = exclude(cross_lateral_query, :cross_lateral_join)
+      assert excluded_cross_lateral_query.joins == base.joins
 
       excluded_left_query = exclude(left_query, :left_join)
       assert excluded_left_query.joins == base.joins
@@ -708,25 +806,43 @@ defmodule Ecto.QueryTest do
 
       excluded_left_lateral_query = exclude(left_lateral_query, :left_lateral_join)
       assert excluded_left_lateral_query.joins == base.joins
+
+      excluded_array_query = exclude(array_query, :array_join)
+      assert excluded_array_query.joins == base.joins
+
+      excluded_left_array_query = exclude(left_array_query, :left_array_join)
+      assert excluded_left_array_query.joins == base.joins
     end
 
     test "removes join qualifiers with named bindings" do
       query =
         from p in "posts", as: :base,
           inner_join: bi in "blogs",
+          on: true,
           as: :blogs_i,
           cross_join: bc in "blogs",
           as: :blogs_c,
+          cross_lateral_join: bcl in "blogs",
+          as: :blogs_bcl,
           left_join: bl in "blogs",
+          on: true,
           as: :blogs_l,
           right_join: br in "blogs",
+          on: true,
           as: :blogs_r,
           full_join: bf in "blogs",
+          on: true,
           as: :blogs_f,
           inner_lateral_join: bil in "blogs",
+          on: true,
           as: :blogs_il,
           left_lateral_join: bll in "blogs",
-          as: :blogs_ll
+          on: true,
+          as: :blogs_ll,
+          array_join: ba in "blogs",
+          as: :blogs_a,
+          left_array_join: bla in "blogs",
+          as: :blogs_la
 
       original_joins_number = length(query.joins)
       original_aliases_number = map_size(query.aliases)
@@ -742,6 +858,12 @@ defmodule Ecto.QueryTest do
       assert map_size(excluded_cross_join_query.aliases) == original_aliases_number - 1
       refute Map.has_key?(excluded_cross_join_query.aliases, :blogs_c)
       assert Map.has_key?(excluded_cross_join_query.aliases, :base)
+
+      excluded_cross_lateral_join_query = exclude(query, :cross_lateral_join)
+      assert length(excluded_cross_lateral_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_cross_lateral_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_cross_lateral_join_query.aliases, :blogs_bcl)
+      assert Map.has_key?(excluded_cross_lateral_join_query.aliases, :base)
 
       excluded_left_join_query = exclude(query, :left_join)
       assert length(excluded_left_join_query.joins) == original_joins_number - 1
@@ -773,9 +895,93 @@ defmodule Ecto.QueryTest do
       refute Map.has_key?(excluded_left_lateral_join_query.aliases, :blogs_ll)
       assert Map.has_key?(excluded_left_lateral_join_query.aliases, :base)
 
+      excluded_array_join_query = exclude(query, :array_join)
+      assert length(excluded_array_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_array_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_array_join_query.aliases, :blogs_a)
+      assert Map.has_key?(excluded_array_join_query.aliases, :base)
+
+      excluded_left_array_join_query = exclude(query, :left_array_join)
+      assert length(excluded_left_array_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_left_array_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_left_array_join_query.aliases, :blogs_la)
+      assert Map.has_key?(excluded_left_array_join_query.aliases, :base)
+
       excluded_all_joins_query = exclude(query, :join)
       assert excluded_all_joins_query.joins == []
       assert Map.has_key?(excluded_all_joins_query.aliases, :base)
+    end
+  end
+
+  describe "dynamic/2" do
+    test "can be used to merge two dynamics" do
+      left = dynamic([posts], posts.is_public == true)
+      right = dynamic([posts], posts.is_draft == false)
+
+      assert inspect(dynamic(^left and ^right)) ==
+        inspect(dynamic([posts], posts.is_public == true and posts.is_draft == false))
+
+      assert inspect(dynamic(^left or ^right)) ==
+        inspect(dynamic([posts], posts.is_public == true or posts.is_draft == false))
+    end
+
+    test "can be used to merge dynamics with subquery" do
+      subquery =
+        from c in "comments",
+          where: c.commented_by == ^Ecto.UUID.generate(),
+          select: c.post_id
+
+      dynamic = dynamic([posts], posts.is_public == true)
+      dynamic_with_subquery = dynamic([posts], posts.id in subquery(subquery))
+
+      assert inspect(dynamic(^dynamic and ^dynamic_with_subquery)) ==
+        inspect(dynamic([posts], posts.is_public == true and posts.id in subquery(subquery)))
+
+      assert inspect(dynamic(^dynamic_with_subquery or ^dynamic)) ==
+        inspect(dynamic([posts], posts.id in subquery(subquery) or posts.is_public == true))
+    end
+
+    test "can be used to merge two dynamics with named bindings" do
+      left = dynamic([post: post], post.is_public == true)
+      right = dynamic([post: post], post.is_draft == false)
+
+      query = from p in "post", as: :post
+
+      assert inspect(where(query, ^dynamic(^left and ^right))) ==
+        inspect(where(query, [post: post], post.is_public == true and post.is_draft == false))
+    end
+
+    test "can be used to merge two dynamics with subquery that reuse named binding" do
+      subquery =
+        from c in "comments",
+          where: c.commented_by == ^Ecto.UUID.generate(),
+          select: c.post_id
+
+      dynamic = dynamic([post: post], post.is_public == ^true)
+      dynamic_with_subquery = dynamic([post: post], post.id in subquery(subquery))
+      dynamic_not_in = dynamic([post: post], post.foo not in ^[1, 2, 3])
+
+      query = from p in "post", as: :post
+
+      assert inspect(where(query, ^dynamic(^dynamic and ^dynamic_with_subquery))) ==
+        inspect(where(query, [post: post], post.is_public == ^true and post.id in subquery(subquery)))
+
+      assert inspect(where(query, ^dynamic(^dynamic_with_subquery or ^dynamic))) ==
+        inspect(where(query, [post: post], post.id in subquery(subquery) or post.is_public == ^true))
+
+      assert inspect(where(query, ^dynamic(^dynamic_with_subquery and ^dynamic and ^dynamic_not_in))) ==
+        inspect(where(query, [post: post], post.id in subquery(subquery) and post.is_public == ^true and post.foo not in ^[1, 2, 3]))
+    end
+
+    test "merges with precedence" do
+      left = dynamic([posts], posts.is_public == true)
+      right = dynamic([posts], posts.is_draft == false)
+
+      assert inspect(dynamic(^left or ^left and ^right)) ==
+        inspect(dynamic([posts], posts.is_public == true or (posts.is_public == true and posts.is_draft == false)))
+
+      assert inspect(dynamic(^left and ^left or ^right)) ==
+        inspect(dynamic([posts], (posts.is_public == true and posts.is_public == true) or posts.is_draft == false))
     end
   end
 
@@ -794,6 +1000,47 @@ defmodule Ecto.QueryTest do
       end
     end
 
+    test "supports literals" do
+      query = from p in "posts", select: fragment("? COLLATE ?", p.name, literal(^"es_ES"))
+      assert {:fragment, _, parts} = query.select.expr
+
+      assert [
+               raw: "",
+               expr: {{:., _, [{:&, _, [0]}, :name]}, _, _},
+               raw: " COLLATE ",
+               expr: {:literal, _, ["es_ES"]},
+               raw: ""
+             ] = parts
+
+      assert_raise ArgumentError, "literal(^value) expects `value` to be a string, got `123`", fn ->
+        from p in "posts", select: fragment("? COLLATE ?", p.name, literal(^123))
+      end
+    end
+
+    test "supports list splicing" do
+      two = 2
+      three = 3
+
+      query =
+        from p in "posts", where: p.id in fragment("(?, ?, ?)", ^1, splice(^[two, three, 4]), ^5)
+
+      assert {:in, _, [_, {:fragment, _, parts}]} = hd(query.wheres).expr
+
+      assert [
+               raw: "(",
+               expr: {:^, _, [0]},
+               raw: ", ",
+               expr: {:splice, _, [{:^, _, [1]}, 3]},
+               raw: ", ",
+               expr: {:^, _, [2]},
+               raw: ")"
+             ] = parts
+
+      assert_raise ArgumentError, "splice(^value) expects `value` to be a list, got `234`", fn ->
+        from p in "posts", where: p.id in fragment("(?)", splice(^234))
+      end
+    end
+
     test "keeps UTF-8 encoding" do
       assert inspect(from p in "posts", where: fragment("héllò")) ==
              ~s[#Ecto.Query<from p0 in \"posts\", where: fragment("héllò")>]
@@ -804,8 +1051,8 @@ defmodule Ecto.QueryTest do
     test "returns true if query has a named binding" do
       query =
         from(p in "posts", as: :posts,
-          join: b in "blogs",
-          join: c in "comments", as: :comment,
+          join: b in "blogs", on: true,
+          join: c in "comments", on: true, as: :comment,
           join: l in "links", on: l.valid, as: :link)
 
       assert has_named_binding?(query, :posts)
@@ -829,15 +1076,85 @@ defmodule Ecto.QueryTest do
                    ~r"protocol Ecto.Queryable not implemented for \[\]",
                    fn -> has_named_binding?([], :posts) end
     end
+
+    test "is_named_binding/2 guard" do
+      named_binding_query = from p in "posts", as: :posts
+      no_binding_query = from p in "posts"
+
+      assert is_named_binding(named_binding_query, :posts)
+      refute is_named_binding(no_binding_query, :posts)
+      refute is_named_binding("posts", :posts)
+    end
+  end
+
+  describe "with_named_binding/3" do
+    test "executes a function with arity 1 when query does not have a named binding" do
+      query = from(p in "posts", as: :posts)
+
+      fun =
+        fn query ->
+          join(query, :left, [posts: posts], c in "comments", on: true, as: :comments)
+        end
+
+      query = with_named_binding(query, :comments, fun)
+
+      assert has_named_binding?(query, :comments)
+      assert %{joins: [%{as: :comments, source: {"comments", nil}}]} = query
+    end
+
+    test "executes a function with arity 2 when query does not have a named binding" do
+      query = from(p in "posts", as: :posts)
+
+      fun =
+        fn query, binding ->
+          join(query, :left, [posts: posts], c in ^binding, on: true, as: ^binding)
+        end
+
+      query = with_named_binding(query, :comments, fun)
+
+      assert has_named_binding?(query, :comments)
+      assert %{joins: [%{as: :comments, source: {nil, :comments}}]} = query
+    end
+
+    test "does not execute a function when query has a named binding" do
+      query =
+        from(p in "posts", as: :posts,
+          join: c in "comments", on: true, as: :comments)
+
+      fun =
+        fn _query ->
+          raise "this function should not be called"
+        end
+
+      assert with_named_binding(query, :comments, fun) == query
+    end
+
+    test "raises when callback does not return Ecto.Query struct" do
+      assert_raise RuntimeError,
+                   ~r"callback function for with_named_binding/3 should return an Ecto.Query struct, got: :foo",
+                   fn -> with_named_binding(Schema, :comments, fn _query -> :foo end) end
+    end
+
+    test "raises when callback does not create a named binding" do
+      assert_raise RuntimeError,
+                   ~r"callback function for with_named_binding/3 should create a named binding for key :comments",
+                   fn -> with_named_binding(Schema, :comments, & &1) end
+    end
+
+    test "raises when callback is not a function of arity 1 or 2" do
+      assert_raise ArgumentError,
+                   ~r"callback function for with_named_binding/3 should accept one or two arguments, got:",
+                   fn -> with_named_binding(Schema, :comments, &{&1, &2, &3}) end
+    end
+
+    test "casts queryable to query" do
+      assert_raise Protocol.UndefinedError,
+                   ~r"protocol Ecto.Queryable not implemented for \[\]",
+                   fn -> with_named_binding([], :posts, & &1) end
+    end
   end
 
   describe "reverse_order/1" do
-    defmodule ReverseOrder do
-      use Ecto.Schema
-      schema "reverse_order" do
-      end
-    end
-
     test "reverses the order of a simple query" do
       order_bys = [asc: :inserted_at, desc: :id]
       reversed_order_bys = [desc: :inserted_at, asc: :id]
@@ -847,7 +1164,7 @@ defmodule Ecto.QueryTest do
     end
 
     test "reverses by primary key with no order" do
-      q = from(p in ReverseOrder)
+      q = from(p in Schema)
       assert inspect(reverse_order(q)) == inspect(order_by(q, desc: :id))
     end
   end

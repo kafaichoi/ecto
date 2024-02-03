@@ -41,6 +41,8 @@ defmodule Ecto.Query.Builder do
     ntile: {1, :integer}
   ]
 
+  @select_alias_dummy_value []
+
   @typedoc """
   Quoted types store primitive types and types in the format
   {source, quoted}. The latter are handled directly in the planner,
@@ -52,6 +54,17 @@ defmodule Ecto.Query.Builder do
   """
   @type quoted_type :: Ecto.Type.primitive | {non_neg_integer, atom | Macro.t}
 
+  @typedoc """
+  The accumulator during escape.
+
+  If the subqueries field is available, subquery escaping must take place.
+  """
+  @type acc :: %{
+          optional(:subqueries) => list(Macro.t()),
+          optional(:take) => %{non_neg_integer => Macro.t()},
+          optional(any) => any
+        }
+
   @doc """
   Smart escapes a query expression and extracts interpolated values in
   a map.
@@ -61,20 +74,18 @@ defmodule Ecto.Query.Builder do
   with `^index` in the query where index is a number indexing into the
   map.
   """
-  @spec escape(Macro.t, quoted_type, {list, term}, Keyword.t,
-               Macro.Env.t | {Macro.Env.t, fun}) :: {Macro.t, {list, term}}
+  @spec escape(Macro.t, quoted_type | {:in, quoted_type} | {:out, quoted_type} | {:splice, quoted_type},
+               {list, acc}, Keyword.t, Macro.Env.t | {Macro.Env.t, fun}) :: {Macro.t, {list, acc}}
   def escape(expr, type, params_acc, vars, env)
 
   # var.x - where var is bound
-  def escape({{:., _, [{var, _, context}, field]}, _, []}, _type, params_acc, vars, _env)
-      when is_atom(var) and is_atom(context) and is_atom(field) do
-    {escape_field!(var, field, vars), params_acc}
+  def escape({{:., _, [callee, field]}, _, []}, _type, params_acc, vars, _env) when is_atom(field) do
+    {escape_field!(callee, field, vars), params_acc}
   end
 
   # field macro
-  def escape({:field, _, [{var, _, context}, field]}, _type, params_acc, vars, _env)
-      when is_atom(var) and is_atom(context) do
-    {escape_field!(var, field, vars), params_acc}
+  def escape({:field, _, [callee, field]}, _type, params_acc, vars, _env) do
+    {escape_field!(callee, field, vars), params_acc}
   end
 
   # param interpolation
@@ -97,6 +108,10 @@ defmodule Ecto.Query.Builder do
     escape_with_type(expr, type, params_acc, vars, env)
   end
 
+  def escape({:type, _, [{:coalesce, _, [_ | _]} = expr, type]}, _type, params_acc, vars, env) do
+    escape_with_type(expr, type, params_acc, vars, env)
+  end
+
   def escape({:type, _, [{:field, _, [_ | _]} = expr, type]}, _type, params_acc, vars, env) do
     escape_with_type(expr, type, params_acc, vars, env)
   end
@@ -106,8 +121,20 @@ defmodule Ecto.Query.Builder do
     escape_with_type(op_expr, type, params_acc, vars, env)
   end
 
-  def escape({:type, _, [{fun, _, [_ | _]} = expr, type]}, _type, params_acc, vars, env)
-      when fun in ~w(fragment avg count max min sum over filter)a do
+  def escape({:type, _, [{fun, _, args} = expr, type]}, _type, params_acc, vars, env)
+      when is_list(args) and fun in ~w(fragment avg count max min sum over filter)a do
+    escape_with_type(expr, type, params_acc, vars, env)
+  end
+
+  def escape({:type, _, [{:json_extract_path, _, [_ | _]} = expr, type]}, _type, params_acc, vars, env) do
+    escape_with_type(expr, type, params_acc, vars, env)
+  end
+
+  def escape({:type, _, [{{:., _, [Access, :get]}, _, _} = access_expr, type]}, _type, params_acc, vars, env) do
+    escape_with_type(access_expr, type, params_acc, vars, env)
+  end
+
+  def escape({:type, _, [{{:., _, [{:parent_as, _, [_parent]}, _field]}, _, []} = expr, type]}, _type, params_acc, vars, env) do
     escape_with_type(expr, type, params_acc, vars, env)
   end
 
@@ -118,10 +145,13 @@ defmodule Ecto.Query.Builder do
         the first argument of type/2 must be one of:
 
           * interpolations, such as ^value
-          * fields, such as p.foo or field(p)
-          * fragments, such fragment("foo(?)", value)
+          * fields, such as p.foo or field(p, :foo)
+          * fragments, such as fragment("foo(?)", value)
           * an arithmetic expression (+, -, *, /)
           * an aggregation or window expression (avg, count, min, max, sum, over, filter)
+          * a conditional expression (coalesce)
+          * access/json paths (p.column[0].field)
+          * parent_as/1 (parent_as(:parent).field)
 
         Got: #{Macro.to_string(expr)}
         """
@@ -134,14 +164,12 @@ defmodule Ecto.Query.Builder do
   # fragments
   def escape({:fragment, _, [query]}, _type, params_acc, vars, env) when is_list(query) do
     {escaped, params_acc} =
-      Enum.map_reduce(query, params_acc, &escape_fragment(&1, :any, &2, vars, env))
+      Enum.map_reduce(query, params_acc, &escape_kw_fragment(&1, &2, vars, env))
     {{:{}, [], [:fragment, [], [escaped]]}, params_acc}
   end
 
   def escape({:fragment, _, [{:^, _, [var]} = _expr]}, _type, params_acc, _vars, _env) do
-    expr = quote do
-      Ecto.Query.Builder.fragment!(unquote(var))
-    end
+    expr = quote do: Ecto.Query.Builder.fragment!(unquote(var))
     {{:{}, [], [:fragment, [], [expr]]}, params_acc}
   end
 
@@ -153,8 +181,18 @@ defmodule Ecto.Query.Builder do
                "It received #{length(frags)} extra argument(s) but expected #{length(pieces) - 1}"
     end
 
-    {frags, params_acc} = Enum.map_reduce(frags, params_acc, &escape(&1, :any, &2, vars, env))
+    {frags, params_acc} = Enum.map_reduce(frags, params_acc, &escape_fragment(&1, &2, vars, env))
     {{:{}, [], [:fragment, [], merge_fragments(pieces, frags)]}, params_acc}
+  end
+
+  # subqueries
+  def escape({:subquery, _, [expr]}, _, {params, %{subqueries: subqueries} = acc}, _vars, _env) do
+    subquery = quote(do: Ecto.Query.subquery(unquote(expr)))
+    index = length(subqueries)
+    # used both in ast and in parameters, as a placeholder.
+    expr = {:subquery, index}
+    acc = %{acc | subqueries: [subquery | subqueries]}
+    {expr, {[expr | params], acc}}
   end
 
   # interval
@@ -191,6 +229,26 @@ defmodule Ecto.Query.Builder do
     {{:{}, [], [:date_add, [], [date, count, interval]]}, params_acc}
   end
 
+  # json
+  def escape({:json_extract_path, _, [field, path]}, type, params_acc, vars, env) do
+    validate_json_field!(field)
+
+    path = escape_json_path(path)
+    {field, params_acc} = escape(field, type, params_acc, vars, env)
+    {{:{}, [], [:json_extract_path, [], [field, path]]}, params_acc}
+  end
+
+  def escape({{:., meta, [Access, :get]}, _, [left, _]} = expr, type, params_acc, vars, env) do
+    case left do
+      {{:., _, _}, _, _} ->
+        {expr, path} = parse_access_get(expr, [])
+        escape({:json_extract_path, meta, [expr, path]}, type, params_acc, vars, env)
+
+      _ ->
+        error!("`#{Macro.to_string(expr)}` is not a valid query expression")
+    end
+  end
+
   # sigils
   def escape({name, _, [_, []]} = sigil, type, params_acc, vars, _env)
       when name in ~w(sigil_s sigil_S sigil_w sigil_W)a do
@@ -221,7 +279,7 @@ defmodule Ecto.Query.Builder do
   # literals
   def escape({:<<>>, _, args} = expr, type, params_acc, vars, _env) do
     valid? = Enum.all?(args, fn
-      {:::, _, [left, _]} -> is_integer(left) or is_binary(left)
+      {:"::", _, [left, _]} -> is_integer(left) or is_binary(left)
       left -> is_integer(left) or is_binary(left)
     end)
 
@@ -240,10 +298,17 @@ defmodule Ecto.Query.Builder do
     do: {literal(number, type, vars), params_acc}
   def escape(binary, type, params_acc, vars, _env) when is_binary(binary),
     do: {literal(binary, type, vars), params_acc}
-  def escape(boolean, type, params_acc, vars, _env) when is_boolean(boolean),
-    do: {literal(boolean, type, vars), params_acc}
   def escape(nil, _type, params_acc, _vars, _env),
     do: {nil, params_acc}
+  def escape(atom, type, params_acc, vars, _env) when is_atom(atom),
+    do: {literal(atom, type, vars), params_acc}
+
+  # negate any expression
+  def escape({:-, meta, arg}, type, params_acc, vars, env) do
+    {escaped_arg, params_acc} = escape(arg, type, params_acc, vars, env)
+    expr = {:{}, [], [:-, meta, escaped_arg]}
+    {expr, params_acc}
+  end
 
   # comparison operators
   def escape({comp_op, _, [left, right]} = expr, type, params_acc, vars, env)
@@ -278,9 +343,10 @@ defmodule Ecto.Query.Builder do
   # in operator
   def escape({:in, _, [left, right]} = expr, type, params_acc, vars, env)
       when is_list(right)
-      when is_tuple(right) and elem(right, 0) in ~w(sigil_w sigil_W)a do
+      when is_tuple(right) and elem(right, 0) in ~w(sigil_w sigil_W @)a do
     assert_type!(expr, type, :boolean)
 
+    right = Macro.expand_once(right, get_env(env))
     {:array, ltype} = quoted_type(right, vars)
     rtype = {:array, quoted_type(left, vars)}
 
@@ -337,6 +403,31 @@ defmodule Ecto.Query.Builder do
     {{:{}, [], [:over, [], [aggregate, window]]}, params_acc}
   end
 
+  def escape({:selected_as, _, [_expr, _name]}, _type, _params_acc, _vars, _env) do
+    error! """
+    selected_as/2 can only be used at the root of a select statement. \
+    If you are trying to use it inside of an expression, consider putting the \
+    expression inside of `selected_as/2` instead. For instance, instead of:
+
+        from p in Post, select: coalesce(selected_as(p.visits, :v), 0)
+
+    use:
+
+        from p in Post, select: selected_as(coalesce(p.visits, 0), :v)
+    """
+  end
+
+  def escape({:selected_as, _, [name]}, _type, params_acc, _vars, _env) do
+    name = quoted_atom!(name, "selected_as/1")
+    expr = {:{}, [], [:selected_as, [], [name]]}
+    {expr, params_acc}
+  end
+
+  def escape({quantifier, meta, [subquery]}, type, params_acc, vars, env) when quantifier in [:all, :any, :exists] do
+    {subquery, params_acc} = escape({:subquery, meta, [subquery]}, type, params_acc, vars, env)
+    {{:{}, [], [quantifier, [], [subquery]]}, params_acc}
+  end
+
   def escape({:=, _, _} = expr, _type, _params_acc, _vars, _env) do
     error! "`#{Macro.to_string(expr)}` is not a valid query expression. " <>
             "The match operator is not supported: `=`. " <>
@@ -374,6 +465,11 @@ defmodule Ecto.Query.Builder do
     error! "Tuples can only be used in comparisons with literal tuples of the same size"
   end
 
+  # Unnecessary parentheses around an expression
+  def escape({:__block__, _, [expr]}, type, params_acc, vars, env) do
+    escape(expr, type, params_acc, vars, env)
+  end
+
   # Other functions - no type casting
   def escape({name, _, args} = expr, type, params_acc, vars, env) when is_atom(name) and is_list(args) do
     case call_type(name, length(args)) do
@@ -406,16 +502,9 @@ defmodule Ecto.Query.Builder do
   end
 
   # Raise nice error message for remote calls
-  def escape({{:., _, [mod, fun]}, _, args} = other, _type, _params_acc, _vars, _env)
+  def escape({{:., _, [_, fun]}, _, _} = other, type, params_acc, vars, env)
       when is_atom(fun) do
-    fun_arity = "#{fun}/#{length(args)}"
-
-    error! """
-    `#{Macro.to_string(other)}` is not a valid query expression. \
-    If you want to invoke #{Macro.to_string(mod)}.#{fun_arity} in \
-    a query, make sure that the module #{Macro.to_string(mod)} \
-    is required and that #{fun_arity} is a macro
-    """
+    try_expansion(other, type, params_acc, vars, env)
   end
 
   # For everything else we raise
@@ -423,13 +512,25 @@ defmodule Ecto.Query.Builder do
     error! "`#{Macro.to_string(other)}` is not a valid query expression"
   end
 
+  defp escape_with_type(expr, {:^, _, [type]}, params_acc, vars, env) do
+    {expr, params_acc} = escape(expr, :any, params_acc, vars, env)
+    {{:{}, [], [:type, [], [expr, type]]}, params_acc}
+  end
+
   defp escape_with_type(expr, type, params_acc, vars, env) do
     type = validate_type!(type, vars, env)
     {expr, params_acc} = escape(expr, type, params_acc, vars, env)
-    {{:{}, [], [:type, [], [expr, Macro.escape(type)]]}, params_acc}
+    {{:{}, [], [:type, [], [expr, escape_type(type)]]}, params_acc}
   end
 
-  defp wrap_nil(params, {:{}, _, [:^, _, [ix]]}), do: wrap_nil(params, ix, [])
+  defp escape_type({:parameterized, _, _} = param), do: Macro.escape(param)
+  defp escape_type(type), do: type
+
+  defp validate_json_field!({{:., _, _}, _, _}), do: :ok
+  defp validate_json_field!({:field, _, _}), do: :ok
+  defp validate_json_field!(unsupported_field), do: error!("`#{Macro.to_string(unsupported_field)}` is not a valid json field")
+
+  defp wrap_nil(params, {:{}, _, [:^, _, [ix]]}), do: wrap_nil(params, length(params) - ix - 1, [])
   defp wrap_nil(params, _other), do: params
 
   defp wrap_nil([{val, type} | params], 0, acc) do
@@ -445,6 +546,7 @@ defmodule Ecto.Query.Builder do
     case Macro.expand(query, get_env(env)) do
       binary when is_binary(binary) ->
         split_fragment(binary, "")
+
       _ ->
         error! bad_fragment_message(Macro.to_string(query))
     end
@@ -488,25 +590,29 @@ defmodule Ecto.Query.Builder do
 
   defp escape_window_function(expr, type, params_acc, vars, env) do
     expr
-    |> validate_window_function!()
+    |> validate_window_function!(env)
     |> escape(type, params_acc, vars, env)
   end
 
-  defp validate_window_function!({:fragment, _, _} = expr), do: expr
+  defp validate_window_function!({:fragment, _, _} = expr, _env), do: expr
 
-  defp validate_window_function!({agg, _, args} = expr) when is_atom(agg) and is_list(args) do
+  defp validate_window_function!({agg, _, args} = expr, env)
+       when is_atom(agg) and is_list(args) do
     if Code.ensure_loaded?(Ecto.Query.WindowAPI) and
-         not function_exported?(Ecto.Query.WindowAPI, agg, length(args)) do
-      error! "unknown window function #{agg}/#{length(args)}. " <>
-               "See Ecto.Query.WindowAPI for all available functions"
+         function_exported?(Ecto.Query.WindowAPI, agg, length(args)) do
+      expr
+    else
+      case Macro.expand_once(expr, get_env(env)) do
+        ^expr ->
+          error! "unknown window function #{agg}/#{length(args)}. " <>
+                   "See Ecto.Query.WindowAPI for all available functions"
+        expr ->
+          validate_window_function!(expr, env)
+      end
     end
-
-    expr
   end
 
-  defp validate_window_function!(expr) do
-    expr
-  end
+  defp validate_window_function!(expr, _), do: expr
 
   defp escape_call({name, _, args}, type, params_acc, vars, env) do
     {args, params_acc} = Enum.map_reduce(args, params_acc, &escape(&1, type, &2, vars, env))
@@ -514,11 +620,31 @@ defmodule Ecto.Query.Builder do
     {expr, params_acc}
   end
 
-  defp escape_field!(var, field, vars) do
+  defp escape_field!({var, _, context}, field, vars)
+       when is_atom(var) and is_atom(context) do
     var   = escape_var!(var, vars)
-    field = quoted_field!(field)
+    field = quoted_atom!(field, "field/2")
     dot   = {:{}, [], [:., [], [var, field]]}
     {:{}, [], [dot, [], []]}
+  end
+
+  defp escape_field!({kind, _, [value]}, field, _vars)
+       when kind in [:as, :parent_as] do
+    value = late_binding!(kind, value)
+    as    = {:{}, [], [kind, [], [value]]}
+    field = quoted_atom!(field, "field/2")
+    dot   = {:{}, [], [:., [], [as, field]]}
+    {:{}, [], [dot, [], []]}
+  end
+
+  defp escape_field!(expr, field, _vars) do
+    error!("""
+    cannot fetch field `#{field}` from `#{Macro.to_string(expr)}`. Can only fetch fields from:
+
+      * sources, such as `p` in `from p in Post`
+      * named bindings, such as `as(:post)` in `from Post, as: :post`
+      * parent named bindings, such as `parent_as(:post)` in a subquery
+    """)
   end
 
   defp escape_interval(count, interval, params_acc, vars, env) do
@@ -533,22 +659,53 @@ defmodule Ecto.Query.Builder do
     {count, quoted_interval!(interval), params_acc}
   end
 
-  defp escape_fragment({key, [{_, _}|_] = exprs}, type, params_acc, vars, env) when is_atom(key) do
-    {escaped, params_acc} = Enum.map_reduce(exprs, params_acc, &escape_fragment(&1, type, &2, vars, env))
+  defp escape_kw_fragment({key, [{_, _}|_] = exprs}, params_acc, vars, env) when is_atom(key) do
+    {escaped, params_acc} = Enum.map_reduce(exprs, params_acc, &escape_kw_fragment(&1, &2, vars, env))
     {{key, escaped}, params_acc}
   end
 
-  defp escape_fragment({key, expr}, type, params_acc, vars, env) when is_atom(key) do
-    {escaped, params_acc} = escape(expr, type, params_acc, vars, env)
+  defp escape_kw_fragment({key, expr}, params_acc, vars, env) when is_atom(key) do
+    {escaped, params_acc} = escape(expr, :any, params_acc, vars, env)
     {{key, escaped}, params_acc}
   end
 
-  defp escape_fragment({key, _expr}, _type, _params_acc, _vars, _env) do
+  defp escape_kw_fragment({key, _expr}, _params_acc, _vars, _env) do
     error! "fragment(...) with keywords accepts only atoms as keys, got `#{Macro.to_string(key)}`"
   end
 
+  defp escape_fragment({:literal, _meta, [expr]}, params_acc, _vars, _env) do
+    case expr do
+      {:^, _, [expr]} ->
+        checked = quote do: Ecto.Query.Builder.literal!(unquote(expr))
+        escaped = {:{}, [], [:literal, [], [checked]]}
+        {escaped, params_acc}
+
+      _ ->
+        error! "literal/1 in fragment expects an interpolated value, such as literal(^value), got `#{Macro.to_string(expr)}`"
+    end
+  end
+
+  defp escape_fragment({:splice, _meta, [splice]}, params_acc, vars, env) do
+    case splice do
+      {:^, _, [value]} = expr ->
+        checked = quote do: Ecto.Query.Builder.splice!(unquote(value))
+        length = quote do: length(unquote(checked))
+        {expr, params_acc} = escape(expr, {:splice, :any}, params_acc, vars, env)
+        escaped =  {:{}, [], [:splice, [], [expr, length]]}
+        {escaped, params_acc}
+
+      _ ->
+        error! "splice/1 in fragment expects an interpolated value, such as splice(^value), got `#{Macro.to_string(splice)}`"
+    end
+  end
+
+  defp escape_fragment(expr, params_acc, vars, env) do
+    escape(expr, :any, params_acc, vars, env)
+  end
+
   defp merge_fragments([h1|t1], [h2|t2]),
-    do: [{:raw, h1}, {:expr, h2}|merge_fragments(t1, t2)]
+    do: [{:raw, h1}, {:expr, h2} | merge_fragments(t1, t2)]
+
   defp merge_fragments([h1], []),
     do: [{:raw, h1}]
 
@@ -589,13 +746,14 @@ defmodule Ecto.Query.Builder do
   @doc """
   Validates the type with the given vars.
   """
-  def validate_type!({composite, type}, vars, env) do
-    {composite, validate_type!(type, vars, env)}
-  end
+  def validate_type!({composite, type}, vars, env),
+    do: {composite, validate_type!(type, vars, env)}
   def validate_type!({:^, _, [type]}, _vars, _env),
     do: type
   def validate_type!({:__aliases__, _, _} = type, _vars, env),
     do: Macro.expand(type, get_env(env))
+  def validate_type!({:parameterized, _, _} = type, _vars, _env),
+    do: type
   def validate_type!(type, _vars, _env) when is_atom(type),
     do: type
   def validate_type!({{:., _, [{var, _, context}, field]}, _, []}, vars, _env)
@@ -604,9 +762,13 @@ defmodule Ecto.Query.Builder do
   def validate_type!({:field, _, [{var, _, context}, field]}, vars, _env)
     when is_atom(var) and is_atom(context) and is_atom(field),
     do: {find_var!(var, vars), field}
+  def validate_type!({:field, _, [{var, _, context}, {:^, _, [field]}]}, vars, _env)
+    when is_atom(var) and is_atom(context),
+    do: {find_var!(var, vars), field}
 
   def validate_type!(type, _vars, _env) do
-    error! "type/2 expects an alias, atom or source.field as second argument, got: `#{Macro.to_string(type)}`"
+    error! "type/2 expects an alias, atom, initialized parameterized type or " <>
+           "source.field as second argument, got: `#{Macro.to_string(type)}`"
   end
 
   @always_tagged [:binary]
@@ -628,6 +790,12 @@ defmodule Ecto.Query.Builder do
   """
   @spec escape_params(list()) :: list()
   def escape_params(list), do: Enum.reverse(list)
+
+  @doc """
+  Escape the select alias map
+  """
+  @spec escape_select_aliases(map()) :: Macro.t
+  def escape_select_aliases(%{} = aliases), do: {:%{}, [], Map.to_list(aliases)}
 
   @doc """
   Escapes a variable according to the given binds.
@@ -721,22 +889,28 @@ defmodule Ecto.Query.Builder do
     end
   end
 
-  def calculate_named_binds(query, []), do: {query, []}
-  def calculate_named_binds(query, vars) do
+  defp calculate_named_binds(query, []), do: {query, []}
+  defp calculate_named_binds(query, vars) do
+    assignments =
+      for {:named, key, name} <- vars do
+        quote do
+          unquote({key, [], __MODULE__}) = unquote(__MODULE__).count_alias!(query, unquote(name))
+        end
+      end
+
     query =
       quote do
         query = Ecto.Queryable.to_query(unquote(query))
+        unquote_splicing(assignments)
+        query
       end
 
-    vars =
-      for {:named, key, name} <- vars do
-        {key,
-         quote do
-           Ecto.Query.Builder.count_alias!(query, unquote(name))
-         end}
+    pairs =
+      for {:named, key, _name} <- vars do
+        {key, {key, [], __MODULE__}}
       end
 
-    {query, vars}
+    {query, pairs}
   end
 
   @doc """
@@ -774,12 +948,17 @@ defmodule Ecto.Query.Builder do
         error! """
         `#{Macro.to_string(expr)}` is not a valid query expression.
 
-        * If you intended to call a database function, please check the documentation
-          for Ecto.Query to see the supported database expressions
-
         * If you intended to call an Elixir function or introduce a value,
           you need to explicitly interpolate it with ^
+
+        * If you intended to call a database function, please check the documentation
+          for Ecto.Query.API to see the supported database expressions
+
+        * If you intended to extend Ecto's query DSL, make sure that you have required
+          the module or imported the relevant function. Note that you need macros to
+          extend Ecto's querying capabilities
         """
+
       expanded ->
         fun.(expanded, type, params, vars, env)
     end
@@ -796,20 +975,90 @@ defmodule Ecto.Query.Builder do
   Checks if the field is an atom at compilation time or
   delegate the check to runtime for interpolation.
   """
-  def quoted_field!({:^, _, [expr]}),
-    do: quote(do: Ecto.Query.Builder.field!(unquote(expr)))
-  def quoted_field!(atom) when is_atom(atom),
+  def quoted_atom!({:^, _, [expr]}, used_ref),
+    do: quote(do: Ecto.Query.Builder.atom!(unquote(expr), unquote(used_ref)))
+
+  def quoted_atom!(atom, _used_ref) when is_atom(atom),
     do: atom
-  def quoted_field!(other),
-    do: error!("expected literal atom or interpolated value in field/2, got: `#{inspect other}`")
+
+  def quoted_atom!(other, used_ref),
+    do:
+      error!(
+        "expected literal atom or interpolated value in #{used_ref}, got: " <>
+        "`#{Macro.to_string(other)}`"
+      )
 
   @doc """
   Called by escaper at runtime to verify that value is an atom.
   """
-  def field!(atom) when is_atom(atom),
+  def atom!(atom, _used_ref) when is_atom(atom),
     do: atom
-  def field!(other),
-    do: error!("expected atom in field/2, got: `#{inspect other}`")
+
+  def atom!(other, used_ref),
+    do: error!("expected atom in #{used_ref}, got: `#{inspect other}`")
+
+  @doc """
+  Checks if the value of a late binding is an interpolation or
+  a quoted atom.
+  """
+  def late_binding!(kind, value) do
+    case value do
+      {:^, _, [value]} ->
+        value
+
+      other ->
+        quoted_atom!(other, "#{kind}/1")
+    end
+  end
+
+  defp escape_json_path(path) when is_list(path) do
+    Enum.map(path, &quoted_json_path_element!/1)
+  end
+
+  defp escape_json_path({:^, _, [path]})  do
+    quote do
+      path = Ecto.Query.Builder.json_path!(unquote(path))
+      Enum.map(path, &Ecto.Query.Builder.json_path_element!/1)
+    end
+  end
+
+  defp escape_json_path(other) do
+    error!("expected JSON path to be a literal list or interpolated value, got: `#{Macro.to_string(other)}`")
+  end
+
+  defp quoted_json_path_element!({:^, _, [expr]}),
+    do: quote(do: Ecto.Query.Builder.json_path_element!(unquote(expr)))
+
+  defp quoted_json_path_element!(binary) when is_binary(binary),
+    do: binary
+
+  defp quoted_json_path_element!(integer) when is_integer(integer),
+    do: integer
+
+  defp quoted_json_path_element!(other),
+    do:
+      error!(
+        "expected JSON path to contain literal strings, literal integers, or interpolated values, got: " <>
+        "`#{Macro.to_string(other)}`"
+      )
+
+  @doc """
+  Called by escaper at runtime to verify that value is a string or an integer.
+  """
+  def json_path_element!(binary) when is_binary(binary),
+    do: binary
+  def json_path_element!(integer) when is_integer(integer),
+    do: integer
+  def json_path_element!(other),
+    do: error!("expected string or integer in json_extract_path/2, got: `#{inspect other}`")
+
+  @doc """
+  Called by escaper at runtime to verify that path is a list
+  """
+  def json_path!(path) when is_list(path),
+    do: path
+  def json_path!(path),
+    do: error!("expected `path` to be a list in json_extract_path/2, got: `#{inspect path}`")
 
   @doc """
   Called by escaper at runtime to verify that a value is not nil.
@@ -832,13 +1081,37 @@ defmodule Ecto.Query.Builder do
     do: interval!(other)
 
   @doc """
-  Called by escaper at runtime to verify keywords.
+  Called by escaper at runtime to verify fragment keywords.
   """
   def fragment!(kw) do
     if Keyword.keyword?(kw) do
       kw
     else
       raise ArgumentError, bad_fragment_message(inspect(kw))
+    end
+  end
+
+  @doc """
+  Called by escaper at runtime to verify literal in fragments.
+  """
+  def literal!(literal) do
+    if is_binary(literal) do
+      literal
+    else
+      raise ArgumentError,
+            "literal(^value) expects `value` to be a string, got `#{inspect(literal)}`"
+    end
+  end
+
+  @doc """
+  Called by escaper at runtime to verify splice in fragments.
+  """
+  def splice!(value) do
+    if is_list(value) do
+      value
+    else
+      raise ArgumentError,
+            "splice(^value) expects `value` to be a list, got `#{inspect(value)}`"
     end
   end
 
@@ -856,12 +1129,8 @@ defmodule Ecto.Query.Builder do
   @doc """
   Negates the given number.
   """
-  def negate!(%Decimal{} = decimal) do
-    Decimal.minus(decimal)
-  end
-  def negate!(number) when is_number(number) do
-    -number
-  end
+  def negate!(%Decimal{} = decimal), do: Decimal.negate(decimal)
+  def negate!(number) when is_number(number), do: -number
 
   @doc """
   Returns the type of an expression at build time.
@@ -873,9 +1142,21 @@ defmodule Ecto.Query.Builder do
     when is_atom(var) and is_atom(context) and is_atom(field),
     do: {find_var!(var, vars), field}
 
+  def quoted_type({{:., _, [{kind, _, [value]}, field]}, _, []}, _vars)
+      when kind in [:as, :parent_as] do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, field}
+  end
+
   def quoted_type({:field, _, [{var, _, context}, field]}, vars)
     when is_atom(var) and is_atom(context) and is_atom(field),
     do: {find_var!(var, vars), field}
+
+  def quoted_type({:field, _, [{kind, _, [value]}, field]}, _vars)
+      when kind in [:as, :parent_as] and is_atom(field) do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, field}
+  end
 
   # Unquoting code here means the second argument of field will
   # always be unquoted twice, one by the type checking and another
@@ -885,9 +1166,15 @@ defmodule Ecto.Query.Builder do
     when is_atom(var) and is_atom(context),
     do: {find_var!(var, vars), code}
 
+  def quoted_type({:field, _, [{kind, _, [value]}, {:^, _, [code]}]}, _vars)
+      when kind in [:as, :parent_as] do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, code}
+  end
+
   # Interval
-  def quoted_type({:datetime_add, _, [_, _, __]}, _vars), do: :naive_datetime
-  def quoted_type({:date_add, _, [_, _, __]}, _vars), do: :date
+  def quoted_type({:datetime_add, _, [_, _, _]}, _vars), do: :naive_datetime
+  def quoted_type({:date_add, _, [_, _, _]}, _vars), do: :date
 
   # Tagged
   def quoted_type({:<<>>, _, _}, _vars), do: :binary
@@ -922,6 +1209,7 @@ defmodule Ecto.Query.Builder do
   def quoted_type(literal, _vars) when is_float(literal),   do: :float
   def quoted_type(literal, _vars) when is_binary(literal),  do: :string
   def quoted_type(literal, _vars) when is_boolean(literal), do: :boolean
+  def quoted_type(literal, _vars) when is_atom(literal) and not is_nil(literal), do: :atom
   def quoted_type(literal, _vars) when is_integer(literal), do: :integer
 
   # Tuples
@@ -985,6 +1273,43 @@ defmodule Ecto.Query.Builder do
   end
 
   @doc """
+  Bump subqueries by the count of pre-existing subqueries.
+  """
+  def bump_subqueries(expr, []), do: expr
+
+  def bump_subqueries(expr, subqueries) do
+    len = length(subqueries)
+
+    Macro.prewalk(expr, fn
+      {:subquery, counter} -> {:subquery, len + counter}
+      other -> other
+    end)
+  end
+
+  @doc """
+  Called by the select escaper at compile time and dynamic builder at runtime to track select aliases
+  """
+  def add_select_alias(aliases, name) when is_map(aliases) and is_atom(name) do
+    case aliases do
+      %{^name => _} ->
+        error! "the alias `#{inspect(name)}` has been specified more than once using `selected_as/2`"
+
+      aliases ->
+        Map.put(aliases, name, @select_alias_dummy_value)
+    end
+  end
+
+  def add_select_alias(aliases, name) do
+    aliases =
+      case aliases do
+        %{} -> Macro.escape(aliases)
+        aliases -> aliases
+      end
+
+    quote do: Ecto.Query.Builder.add_select_alias(unquote(aliases), unquote(name))
+  end
+
+  @doc """
   Applies a query at compilation time or at runtime.
 
   This function is responsible for checking if a given query is an
@@ -995,7 +1320,7 @@ defmodule Ecto.Query.Builder do
   given `module`, otherwise, it delegates the call to runtime.
 
   It is important to keep in mind the complexities introduced
-  by this function. In particular, a %Query{} is mixture of escaped
+  by this function. In particular, a %Query{} is a mixture of escaped
   and unescaped expressions which makes it impossible for this
   function to properly escape or unescape it at compile/runtime.
   For this reason, the apply function should be ready to handle
@@ -1025,20 +1350,24 @@ defmodule Ecto.Query.Builder do
   the query properly, but they will be in their runtime form
   when invoked at runtime.
   """
+  @spec apply_query(Macro.t, Macro.t, Macro.t, Macro.Env.t) :: Macro.t
   def apply_query(query, module, args, env) do
-    query = Macro.expand(query, env)
-    case unescape_query(query) do
-      %Query{} = unescaped ->
-        apply(module, :apply, [unescaped|args]) |> escape_query
-      _ ->
+    case Macro.expand(query, env) |> unescape_query() do
+      %Query{} = compiletime_query ->
+        apply(module, :apply, [compiletime_query | args])
+        |> escape_query()
+
+      runtime_query ->
         quote do
-          query = unquote(query) # Unquote the query for any binding variable
+          # Unquote the query before `module.apply()` for any binding variable.
+          query = unquote(runtime_query)
           unquote(module).apply(query, unquote_splicing(args))
         end
     end
   end
 
   # Unescapes an `Ecto.Query` struct.
+  @spec unescape_query(Macro.t) :: Query.t | Macro.t
   defp unescape_query({:%, _, [Query, {:%{}, _, list}]}) do
     struct(Query, list)
   end
@@ -1054,8 +1383,20 @@ defmodule Ecto.Query.Builder do
   end
 
   # Escapes an `Ecto.Query` and associated structs.
-  defp escape_query(%Query{} = query),
-    do: {:%{}, [], Map.to_list(query)}
-  defp escape_query(other),
-    do: other
+  @spec escape_query(Query.t) :: Macro.t
+  defp escape_query(%Query{} = query), do: {:%{}, [], Map.to_list(query)}
+
+  defp parse_access_get({{:., _, [Access, :get]}, _, [left, right]}, acc) do
+    parse_access_get(left, [right | acc])
+  end
+
+  defp parse_access_get({{:., _, [{var, _, context}, field]}, _, []} = expr, acc)
+       when is_atom(var) and is_atom(context) and is_atom(field) do
+    {expr, acc}
+  end
+
+  defp parse_access_get({{:., _, [{kind, _, [_]}, field]}, _, []} = expr, acc)
+       when kind in [:as, :parent_as] and is_atom(field) do
+    {expr, acc}
+  end
 end

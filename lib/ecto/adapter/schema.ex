@@ -19,6 +19,7 @@ defmodule Ecto.Adapter.Schema do
   @type filters :: Keyword.t()
   @type constraints :: Keyword.t()
   @type returning :: [atom]
+  @type placeholders :: [term]
   @type options :: Keyword.t()
 
   @type on_conflict ::
@@ -49,8 +50,9 @@ defmodule Ecto.Adapter.Schema do
               [[{atom, term | {Ecto.Query.t(), list()}}]],
               on_conflict,
               returning,
+              placeholders,
               options
-            ) :: {integer, [[term]] | nil}
+            ) :: {non_neg_integer, [[term]] | nil}
 
   @doc """
   Inserts a single new struct in the data store.
@@ -85,6 +87,6 @@ defmodule Ecto.Adapter.Schema do
   in case there is no record matching the given filters,
   `{:error, :stale}` is returned.
   """
-  @callback delete(adapter_meta, schema_meta, filters, options) ::
+  @callback delete(adapter_meta, schema_meta, filters, returning, options) ::
               {:ok, fields} | {:invalid, constraints} | {:error, :stale}
 end

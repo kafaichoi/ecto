@@ -9,6 +9,7 @@ defmodule Ecto.Changeset.EmbeddedTest do
   alias __MODULE__.Author
   alias __MODULE__.Profile
   alias __MODULE__.Post
+  alias __MODULE__.Nested
 
   defmodule Author do
     use Ecto.Schema
@@ -22,6 +23,7 @@ defmodule Ecto.Changeset.EmbeddedTest do
       embeds_one :inline_profile, Profile do
         field :name, :string
       end
+      embeds_one :nested, Nested
       embeds_many :posts, Post, on_replace: :delete
       embeds_many :raise_posts, Post, on_replace: :raise
       embeds_many :invalid_posts, Post, on_replace: :mark_as_invalid
@@ -37,12 +39,20 @@ defmodule Ecto.Changeset.EmbeddedTest do
 
     schema "posts" do
       field :title, :string
+      field :position, :integer
     end
 
     def changeset(schema, params) do
       cast(schema, params, ~w(title)a)
       |> validate_required(:title)
       |> validate_length(:title, min: 3)
+    end
+
+    def changeset_with_position(schema, params, position) do
+      cast(schema, params, ~w(title)a)
+      |> validate_required(:title)
+      |> validate_length(:title, min: 3)
+      |> put_change(:position, position)
     end
 
     def optional_changeset(schema, params) do
@@ -77,6 +87,82 @@ defmodule Ecto.Changeset.EmbeddedTest do
       changeset(schema, params)
       |> Map.put(:action, Map.get(params, :action, :update))
     end
+
+    def changeset_with_position(schema, params, _position) do
+      cast(schema, params, ~w(name id)a)
+      |> validate_required(:name)
+      |> validate_length(:name, min: 3)
+    end
+  end
+
+  defmodule Nested do
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    embedded_schema do
+      embeds_one :profile, Profile
+    end
+
+    def changeset(schema, params) do
+      cast(schema, params, [])
+      |> cast_embed(:profile)
+    end
+  end
+
+  defmodule NestedInline do
+    use Ecto.Schema
+    alias Alias.One, warn: false
+    alias Alias.Many, warn: false
+    alias Alias.OneNoPK, warn: false
+    alias Alias.ManyNoPK, warn: false
+
+    schema "nested_inline" do
+      embeds_one :root, Elixir.Root do
+        field :name, :string
+      end
+
+      embeds_one :expanded, :"Elixir.Expanded" do
+        field :name, :string
+      end
+
+      embeds_one :one, One do
+        field :name, :string
+      end
+
+      embeds_one :one_no_pk, OneNoPK, primary_key: false do
+        field :name, :string
+      end
+
+      embeds_many :many, Many do
+        field :title, :string
+      end
+
+      embeds_many :many_no_pk, ManyNoPK, primary_key: false do
+        field :title, :string
+      end
+    end
+  end
+
+  test "nested inline embed can be a root module" do
+    assert Root.__schema__(:fields) == [:id, :name]
+    assert %Ecto.Embedded{related: Root} = NestedInline.__schema__(:embed, :root)
+  end
+
+  test "nested inline embed alias can already be expanded" do
+    assert Expanded.__schema__(:fields) == [:id, :name]
+    assert %Ecto.Embedded{related: Expanded} = NestedInline.__schema__(:embed, :expanded)
+  end
+
+  test "nested inilne embed overwrites conflicting alias" do
+    assert NestedInline.One.__schema__(:fields) == [:id, :name]
+    assert NestedInline.OneNoPK.__schema__(:fields) == [:name]
+    assert NestedInline.Many.__schema__(:fields) == [:id, :title]
+    assert NestedInline.ManyNoPK.__schema__(:fields) == [:title]
+
+    assert %Ecto.Embedded{related: NestedInline.One} = NestedInline.__schema__(:embed, :one)
+    assert %Ecto.Embedded{related: NestedInline.OneNoPK} = NestedInline.__schema__(:embed, :one_no_pk)
+    assert %Ecto.Embedded{related: NestedInline.Many} = NestedInline.__schema__(:embed, :many)
+    assert %Ecto.Embedded{related: NestedInline.ManyNoPK} = NestedInline.__schema__(:embed, :many_no_pk)
   end
 
   defp cast(schema, params, embed, opts \\ []) do
@@ -105,9 +191,15 @@ defmodule Ecto.Changeset.EmbeddedTest do
     refute changeset.changes.profile.valid?
     refute changeset.valid?
 
+    # string
     changeset = cast(%Author{}, %{"profile" => "value"}, :profile, required: true)
     assert changeset.errors == [profile: {"is invalid", [validation: :embed, type: :map]}]
     refute changeset.valid?
+
+    # list
+    changeset = cast(%Author{}, %{"profile" => [%{"name" => "michal"}]}, :profile)
+    assert changeset.changes == %{}
+    assert changeset.errors  == [profile: {"is invalid", [validation: :embed, type: :map]}]
   end
 
   test "cast embeds_one with existing struct updating" do
@@ -352,6 +444,44 @@ defmodule Ecto.Changeset.EmbeddedTest do
     assert changeset.valid?
   end
 
+  test "cast embeds_many with map and sort_param and delete_param" do
+    posts = %{1 => %{"title" => "one"}, 2 => %{"title" => "two"}, 3 => %{"title" => "three"}}
+    opts = [sort_param: :sort, drop_param: :drop]
+
+    changeset = cast(%Author{}, %{"posts" => posts}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ~w(one two three)
+
+    changeset = cast(%Author{}, %{"posts" => posts, "drop" => [2]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["one", "three"]
+
+    changeset = cast(%Author{}, %{posts: posts, drop: [2]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["one", "three"]
+
+    changeset = cast(%Author{}, %{"posts" => posts, "sort" => [2, 3, 1]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ~w(two three one)
+
+    changeset = cast(%Author{}, %{sort: ["new"]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == [nil]
+
+    changeset = cast(%Author{}, %{posts: posts, sort: [2, 3, 1]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ~w(two three one)
+
+    changeset = cast(%Author{}, %{posts: posts, sort: [2]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ~w(two one three)
+
+    changeset = cast(%Author{}, %{posts: posts, sort: [2, "new"]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["two", nil, "one", "three"]
+
+    changeset = cast(%Author{}, %{posts: posts, sort: [3, 2, 1], drop: [2]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["three", "one"]
+
+    changeset = cast(%Author{}, %{posts: posts, sort: [1, "new"], drop: [2, "new"]}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["one", "three"]
+
+    changeset = cast(%Author{}, %{posts: posts, sort: :x, drop: :y}, :posts, opts)
+    assert Enum.map(changeset.changes.posts, & &1.changes[:title]) == ["one", "two", "three"]
+  end
+
   test "cast embeds_many with custom changeset" do
     changeset = cast(%Author{}, %{"posts" => [%{"title" => "hello"}]},
                      :posts, with: &Post.optional_changeset/2)
@@ -501,18 +631,31 @@ defmodule Ecto.Changeset.EmbeddedTest do
     refute changeset.valid?
   end
 
-  test "cast inline embeds_many with valid params" do
-    changeset = cast(%Author{}, %{"inline_posts" => [%{"title" => "hello"}]},
-      :inline_posts, with: &Post.changeset/2)
-    [post] = changeset.changes.inline_posts
-    assert post.changes == %{title: "hello"}
-    assert post.errors == []
-    assert post.action  == :insert
-    assert post.valid?
-    assert changeset.valid?
+  test "argument error when casting embeds_one with arity 3 function" do
+    assert_raise(ArgumentError, ~r/invalid \:with function for relation \:profile/, fn ->
+      params = %{"profile" => %{"name" => "John"}}
+      cast(%Author{}, params, :profile, with: &Profile.changeset_with_position/3)
+    end)
+  end
+
+  test "sends index when casting embeds_many with arity 3 function" do
+    changeset = cast(%Author{}, %{"posts" => [%{"title" => "hello"}, %{"title" => "bye"}]},
+      :posts, with: &Post.changeset_with_position/3)
+    [post, post2] = changeset.changes.posts
+    assert post.changes == %{title: "hello", position: 0}
+    assert post2.changes == %{title: "bye", position: 1}
   end
 
   ## Others
+
+  test "validate_required/3 with has_many raises" do
+    base_changeset = Changeset.change(%Author{})
+
+    assert ExUnit.CaptureIO.capture_io(:stderr, fn ->
+      changeset = Changeset.validate_required(base_changeset, :posts)
+      assert changeset.valid?
+    end) =~ ~r/attempting to determine the presence of embed_many field/
+  end
 
   test "change embeds_one" do
     embed = Author.__schema__(:embed, :profile)
@@ -555,12 +698,12 @@ defmodule Ecto.Changeset.EmbeddedTest do
 
     assert {:ok, changeset, true} =
       Relation.change(embed, %{name: "michal"}, profile)
-    assert changeset.action == :insert
+    assert changeset.action == :update
     assert changeset.changes == %{name: "michal"}
 
     assert {:ok, changeset, true} =
       Relation.change(embed, [name: "michal"], profile)
-    assert changeset.action == :insert
+    assert changeset.action == :update
     assert changeset.changes == %{name: "michal"}
   end
 
@@ -752,16 +895,46 @@ defmodule Ecto.Changeset.EmbeddedTest do
     refute changeset.valid?
   end
 
-  test "put_embed/4 with embeds_one" do
+  test "put_embed/4 insert with embeds_one" do
     base_changeset = Changeset.change(%Author{})
 
     changeset = Changeset.put_embed(base_changeset, :profile, %Profile{name: "michal"})
     assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :insert
 
-    base_changeset = Changeset.change(%Author{profile: %Profile{name: "michal"}})
-    empty_update_changeset = Changeset.change(%Profile{name: "michal"})
+    changeset = Changeset.put_embed(base_changeset, :profile, Changeset.change(%Profile{name: "michal"}))
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :insert
 
-    changeset = Changeset.put_embed(base_changeset, :profile, empty_update_changeset)
+    changeset = Changeset.put_embed(base_changeset, :profile, %{name: "michal"})
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :insert
+
+    changeset = Changeset.put_embed(base_changeset, :profile, name: "michal")
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :insert
+  end
+
+  test "put_embed/4 update with embeds_one" do
+    base_changeset = Changeset.change(%Author{profile: %Profile{id: 1, name: "michal"}})
+
+    update_changeset = Changeset.change(%Profile{id: 1, name: "michal"}, %{name: "tom"})
+    changeset = Changeset.put_embed(base_changeset, :profile, update_changeset)
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :update
+
+    changeset = Changeset.put_embed(base_changeset, :profile, %{id: 1, name: "tom"})
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :update
+
+    changeset = Changeset.put_embed(base_changeset, :profile, id: 1, name: "tom")
+    assert %Ecto.Changeset{} = changeset.changes.profile
+    assert changeset.changes.profile.action == :update
+
+    changeset = Changeset.put_embed(base_changeset, :profile, %Profile{id: 1, name: "tom"})
+    refute Map.has_key?(changeset.changes, :profile)
+
+    changeset = Changeset.put_embed(base_changeset, :profile, %Profile{id: 1, name: "michal"})
     refute Map.has_key?(changeset.changes, :profile)
   end
 
@@ -805,6 +978,16 @@ defmodule Ecto.Changeset.EmbeddedTest do
 
     changeset = Changeset.put_change(base_changeset, :profile, empty_update_changeset)
     refute Map.has_key?(changeset.changes, :profile)
+  end
+
+  test "put_change/4 with nested embed" do
+    changeset =
+      Changeset.change(%Author{}, %{})
+      |> Changeset.put_change(:nested, %Nested{profile: %Profile{name: "tom"}})
+
+    assert {:ok, author} = TestRepo.insert(changeset)
+    assert author.nested.id
+    assert author.nested.profile.id
   end
 
   test "put_embed/4 with embeds_many" do
@@ -859,7 +1042,7 @@ defmodule Ecto.Changeset.EmbeddedTest do
     refute Map.has_key?(changeset.changes, :posts)
   end
 
-  test "get_field/3, fetch_field/2 with embeds" do
+  test "get_field/3, fetch_field/2, get_embed/3 with embeds" do
     profile_changeset = Changeset.change(%Profile{}, name: "michal")
     profile = Changeset.apply_changes(profile_changeset)
 
@@ -868,11 +1051,17 @@ defmodule Ecto.Changeset.EmbeddedTest do
       |> Changeset.change
       |> Changeset.put_embed(:profile, profile_changeset)
     assert Changeset.get_field(changeset, :profile) == profile
+    assert Changeset.get_change(changeset, :profile) == %{profile_changeset | action: :insert}
     assert Changeset.fetch_field(changeset, :profile) == {:changes, profile}
+    assert Changeset.get_embed(changeset, :profile, :changeset) == %{profile_changeset | action: :insert}
+    assert Changeset.get_embed(changeset, :profile, :struct) == profile
 
     changeset = Changeset.change(%Author{profile: profile})
     assert Changeset.get_field(changeset, :profile) == profile
+    assert Changeset.get_change(changeset, :profile) == nil
     assert Changeset.fetch_field(changeset, :profile) == {:data, profile}
+    assert Changeset.get_embed(changeset, :profile, :changeset) == Changeset.change(profile)
+    assert Changeset.get_embed(changeset, :profile, :struct) == profile
 
     post = %Post{id: 1}
     post_changeset = %{Changeset.change(post) | action: :delete}
@@ -882,6 +1071,14 @@ defmodule Ecto.Changeset.EmbeddedTest do
       |> Changeset.put_embed(:posts, [post_changeset])
     assert Changeset.get_field(changeset, :posts) == []
     assert Changeset.fetch_field(changeset, :posts) == {:changes, []}
+    assert Changeset.get_embed(changeset, :posts, :changeset) == [post_changeset]
+    assert Changeset.get_embed(changeset, :posts, :struct) == []
+
+    changeset = Changeset.change(%Author{})
+    assert Changeset.get_field(changeset, :posts) == []
+    assert Changeset.fetch_field(changeset, :posts) == {:data, []}
+    assert Changeset.get_embed(changeset, :posts, :changeset) == []
+    assert Changeset.get_embed(changeset, :posts, :struct) == []
   end
 
   test "empty" do
@@ -964,5 +1161,17 @@ defmodule Ecto.Changeset.EmbeddedTest do
     changeset = cast(%Author{posts: []}, %{"posts" => [%{title: nil}]}, :posts, required: true)
     assert changeset.errors == []
     assert Changeset.traverse_errors(changeset, &(&1)) == %{posts: [%{title: [{"can't be blank", [validation: :required]}]}]}
+  end
+
+  ## traverse_validations
+
+  test "traverses changeset validations with embeds_one" do
+    changeset = cast(%Author{}, %{profile: %{}}, :profile)
+    assert Changeset.traverse_validations(changeset, &(&1)) == %{profile: %{name: [length: [min: 3]]}}
+  end
+
+  test "traverses changeset validations with embeds_many" do
+    changeset = cast(%Author{}, %{posts: [%{}]}, :posts)
+    assert Changeset.traverse_validations(changeset, &(&1)) == %{posts: [%{title: [length: [min: 3]]}]}
   end
 end
